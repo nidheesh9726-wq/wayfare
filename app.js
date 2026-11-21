@@ -72,10 +72,15 @@ function splitList(s) { return String(s || '').split(/[,\n]/).map(x => x.trim())
 function safeUrl(u) { try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } }
 // Opens Google Maps turn-by-turn directions from where you are now. Uses exact coordinates when saved,
 // otherwise the name and city (short shared links can't be turned into directions).
+const mapsPoint = r => typeof r.lat === 'number' && typeof r.lng === 'number' ? `${r.lat},${r.lng}` : [r.name, r.address, r.city].filter(Boolean).join(', ');
 function navHref(r, mode) {
-  const dest = typeof r.lat === 'number' && typeof r.lng === 'number' ? `${r.lat},${r.lng}` : [r.name, r.address, r.city].filter(Boolean).join(', ');
+  const dest = mapsPoint(r);
   if (!dest) return '';
   return 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(dest) + (mode ? '&travelmode=' + mode : '') + '&dir_action=navigate';
+}
+// Route between two saved spots (not from where you are now).
+function routeHref(from, to, mode) {
+  return 'https://www.google.com/maps/dir/?api=1&origin=' + encodeURIComponent(mapsPoint(from)) + '&destination=' + encodeURIComponent(mapsPoint(to)) + (mode ? '&travelmode=' + mode : '');
 }
 function mapsHref(r) {
   const u = safeUrl(r.mapsUrl);
@@ -730,9 +735,10 @@ route(/^#\/r\/([^/]+)$/, async id => {
       ${shown.length ? `<ul class="list">${shown.map(({ x, km }) => `<li style="align-items:center"><a class="rcard grow" href="#/r/${x.id}" style="align-items:center">
           ${x.frontPhotoId ? `<img class="thumb" style="width:52px;height:52px" data-pid="${x.frontPhotoId}" alt="">` : `<div class="thumb ph" style="width:52px;height:52px;font-size:22px">${chipIcon(x)}</div>`}
           <div class="grow"><b>${esc(x.name)}</b> ${x.visited ? '✅' : ''}<div class="small muted">${fmtDist(km)}</div><div>${chipTags(x)}</div></div></a>
-          <a class="btn icon" style="flex:none;font-size:14px" href="${esc(navHref(x, km <= 2 ? 'walking' : ''))}" target="_blank" rel="noopener" aria-label="Navigate to ${esc(x.name)}">🧭 Go</a></li>`).join('')}</ul>`
+          <a class="btn icon" style="flex:none;font-size:14px" href="${esc(routeHref(r, x, km <= 2 ? 'walking' : ''))}" target="_blank" rel="noopener" aria-label="Route from ${esc(r.name)} to ${esc(x.name)}">↪️ Route</a></li>`).join('')}</ul>`
         : `<p class="small muted">No ${KINDS[nearKind].title.toLowerCase()} with a location yet.</p>`}
       ${missing ? `<p class="small muted" style="margin:8px 0 0">${missing} other ${missing === 1 ? KINDS[nearKind].one : KINDS[nearKind].title.toLowerCase()} ${missing === 1 ? 'has' : 'have'} no location yet, so ${missing === 1 ? 'it isn’t' : 'they aren’t'} included.</p>` : ''}
+      <p class="small muted" style="margin:8px 0 0">↪️ Route shows the way from ${esc(r.name)} to that spot.</p>
       <p class="small muted" style="margin:8px 0 0">📍 This ${KINDS[kindOf(r)].one}’s location: ${esc({ link: 'from the Maps link', gps: 'from your phone’s GPS', lookup: 'looked up by name', typed: 'pasted coordinates' }[r.locSrc] || 'saved')}. Change it with ✏️.</p>`;
     hydrateImgs(box);
     $('#nk').onclick = e => { const c = e.target.closest('[data-nk]'); if (c) { nearKind = c.dataset.nk; drawNearby(); } };
@@ -892,7 +898,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.9</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.10</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
