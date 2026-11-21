@@ -70,6 +70,13 @@ const priceText = r => r.price === -1 ? '· Free' : r.price > 0 ? '· ' + '$'.re
 function stars(n) { return n ? '<span class="stars">' + '★'.repeat(n) + '</span>' : ''; }
 function splitList(s) { return String(s || '').split(/[,\n]/).map(x => x.trim()).filter(Boolean); }
 function safeUrl(u) { try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } }
+// Opens Google Maps turn-by-turn directions from where you are now. Uses exact coordinates when saved,
+// otherwise the name and city (short shared links can't be turned into directions).
+function navHref(r, mode) {
+  const dest = typeof r.lat === 'number' && typeof r.lng === 'number' ? `${r.lat},${r.lng}` : [r.name, r.address, r.city].filter(Boolean).join(', ');
+  if (!dest) return '';
+  return 'https://www.google.com/maps/dir/?api=1&destination=' + encodeURIComponent(dest) + (mode ? '&travelmode=' + mode : '') + '&dir_action=navigate';
+}
 function mapsHref(r) {
   const u = safeUrl(r.mapsUrl);
   if (u) return u;
@@ -409,7 +416,7 @@ route(/^#\/trip\/([^/]+)$/, async id => {
           <div><b>${r ? chipIcon(r) + ' ' : ''}${esc(r ? r.name : it.title)}</b></div>
           ${it.place && !r ? `<div class="small muted">${esc(it.place)}</div>` : ''}
           ${it.notes ? `<div class="small">${esc(it.notes)}</div>` : ''}
-          <div class="small" style="margin-top:4px">${href ? `<a class="link" href="${href}">Details</a> · ` : ''}${maps ? `<a class="link" href="${esc(maps)}" target="_blank" rel="noopener">Map</a> · ` : ''}<a class="link" href="#" data-itemedit="${d.id}|${it.id}">Edit</a></div>
+          <div class="small" style="margin-top:4px">${href ? `<a class="link" href="${href}">Details</a> · ` : ''}${maps ? `<a class="link" href="${esc(maps)}" target="_blank" rel="noopener">Map</a> · ` : ''}${(r || it.place) ? `<a class="link" href="${esc(navHref(r || { name: it.place }))}" target="_blank" rel="noopener">Navigate</a> · ` : ''}<a class="link" href="#" data-itemedit="${d.id}|${it.id}">Edit</a></div>
         </div></div>`;
       }).join('')}
       <div class="row dayadd" style="margin-top:10px"><button class="btn grow" data-additem="${d.id}">+ Plan</button><button class="btn grow" data-addfood="${d.id}">+ Restaurant</button><button class="btn grow" data-addplace="${d.id}">+ Place</button></div>
@@ -669,7 +676,10 @@ route(/^#\/r\/([^/]+)$/, async id => {
       <div style="margin-top:4px">${chipTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div>
     </div>
     <div class="row" style="margin-top:12px">
-      ${maps ? `<a class="btn primary grow" href="${esc(maps)}" target="_blank" rel="noopener">📍 Open in Maps</a>` : ''}
+      ${navHref(r) ? `<a class="btn primary grow" href="${esc(navHref(r))}" target="_blank" rel="noopener">🧭 Navigate</a>` : ''}
+      ${maps ? `<a class="btn grow" href="${esc(maps)}" target="_blank" rel="noopener">📍 Maps</a>` : ''}
+    </div>
+    <div class="row" style="margin-top:8px">
       <button class="btn grow" id="visit">${r.visited ? '✅ Visited' : 'Mark visited'}</button>
     </div>
     ${r.visited || r.rating ? `<div class="card"><div class="small muted">Your rating</div><div class="starpick" id="sp">${[1, 2, 3, 4, 5].map(n => `<button data-n="${n}" class="${n <= (r.rating || 0) ? 'on' : ''}">★</button>`).join('')}</div></div>` : ''}
@@ -717,9 +727,10 @@ route(/^#\/r\/([^/]+)$/, async id => {
     const shown = withLoc.slice(0, 8), missing = cands.length - withLoc.length;
     box.innerHTML = `<div class="chips" id="nk" style="margin-bottom:6px">
         <button class="chip ${nearKind === 'food' ? 'on' : ''}" data-nk="food">🍽️ Restaurants</button><button class="chip ${nearKind === 'place' ? 'on' : ''}" data-nk="place">📍 Places</button></div>
-      ${shown.length ? `<ul class="list">${shown.map(({ x, km }) => `<li><a class="rcard grow" href="#/r/${x.id}" style="align-items:center">
+      ${shown.length ? `<ul class="list">${shown.map(({ x, km }) => `<li style="align-items:center"><a class="rcard grow" href="#/r/${x.id}" style="align-items:center">
           ${x.frontPhotoId ? `<img class="thumb" style="width:52px;height:52px" data-pid="${x.frontPhotoId}" alt="">` : `<div class="thumb ph" style="width:52px;height:52px;font-size:22px">${chipIcon(x)}</div>`}
-          <div class="grow"><b>${esc(x.name)}</b> ${x.visited ? '✅' : ''}<div class="small muted">${fmtDist(km)}</div><div>${chipTags(x)}</div></div></a></li>`).join('')}</ul>`
+          <div class="grow"><b>${esc(x.name)}</b> ${x.visited ? '✅' : ''}<div class="small muted">${fmtDist(km)}</div><div>${chipTags(x)}</div></div></a>
+          <a class="btn icon" style="flex:none;font-size:14px" href="${esc(navHref(x, km <= 2 ? 'walking' : ''))}" target="_blank" rel="noopener" aria-label="Navigate to ${esc(x.name)}">🧭 Go</a></li>`).join('')}</ul>`
         : `<p class="small muted">No ${KINDS[nearKind].title.toLowerCase()} with a location yet.</p>`}
       ${missing ? `<p class="small muted" style="margin:8px 0 0">${missing} other ${missing === 1 ? KINDS[nearKind].one : KINDS[nearKind].title.toLowerCase()} ${missing === 1 ? 'has' : 'have'} no location yet, so ${missing === 1 ? 'it isn’t' : 'they aren’t'} included.</p>` : ''}
       <p class="small muted" style="margin:8px 0 0">📍 This ${KINDS[kindOf(r)].one}’s location: ${esc({ link: 'from the Maps link', gps: 'from your phone’s GPS', lookup: 'looked up by name', typed: 'pasted coordinates' }[r.locSrc] || 'saved')}. Change it with ✏️.</p>`;
@@ -881,7 +892,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.8</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.9</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
