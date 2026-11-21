@@ -66,6 +66,7 @@ function repairDays(t) {
   if (out.length === (t.days || []).length) return false;
   t.days = buildDays(t.start, t.end, out); return true;
 }
+const priceText = r => r.price === -1 ? '· Free' : r.price > 0 ? '· ' + '$'.repeat(r.price) : '';
 function stars(n) { return n ? '<span class="stars">' + '★'.repeat(n) + '</span>' : ''; }
 function splitList(s) { return String(s || '').split(/[,\n]/).map(x => x.trim()).filter(Boolean); }
 function safeUrl(u) { try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } }
@@ -305,22 +306,23 @@ route(/^#\/trip\/([^/]+)$/, async id => {
         const href = r ? '#/r/' + r.id : '';
         const maps = r ? mapsHref(r) : safeUrl(it.mapsUrl) || (it.place ? 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(it.place) : '');
         return `<div class="item"><div class="t">${esc(it.time || '')}</div><div class="grow">
-          <div><b>${r ? '🍽️ ' : ''}${esc(r ? r.name : it.title)}</b></div>
+          <div><b>${r ? chipIcon(r) + ' ' : ''}${esc(r ? r.name : it.title)}</b></div>
           ${it.place && !r ? `<div class="small muted">${esc(it.place)}</div>` : ''}
           ${it.notes ? `<div class="small">${esc(it.notes)}</div>` : ''}
           <div class="small" style="margin-top:4px">${href ? `<a class="link" href="${href}">Details</a> · ` : ''}${maps ? `<a class="link" href="${esc(maps)}" target="_blank" rel="noopener">Map</a> · ` : ''}<a class="link" href="#" data-itemedit="${d.id}|${it.id}">Edit</a></div>
         </div></div>`;
       }).join('')}
-      <div class="row" style="margin-top:10px"><button class="btn grow" data-additem="${d.id}">+ Plan</button><button class="btn grow" data-addfood="${d.id}">+ Restaurant</button></div>
+      <div class="row dayadd" style="margin-top:10px"><button class="btn grow" data-additem="${d.id}">+ Plan</button><button class="btn grow" data-addfood="${d.id}">+ Restaurant</button><button class="btn grow" data-addplace="${d.id}">+ Place</button></div>
     </section>`;
   }).join('');
   $('#assign') && ($('#assign').onclick = e => { e.preventDefault(); editTrip(t); });
   app.onclick = e => {
-    const b = e.target.closest('[data-additem],[data-addfood],[data-itemedit],[data-dayedit]');
+    const b = e.target.closest('[data-additem],[data-addfood],[data-addplace],[data-itemedit],[data-dayedit]');
     if (!b) return;
     e.preventDefault();
     if (b.dataset.additem) editItem(t, b.dataset.additem);
-    if (b.dataset.addfood) pickRestaurantForDay(t, b.dataset.addfood);
+    if (b.dataset.addfood) pickForDay(t, b.dataset.addfood, 'food');
+    if (b.dataset.addplace) pickForDay(t, b.dataset.addplace, 'place');
     if (b.dataset.itemedit) { const [dId, iId] = b.dataset.itemedit.split('|'); editItem(t, dId, iId); }
     if (b.dataset.dayedit) {
       const d = t.days.find(x => x.id === b.dataset.dayedit);
@@ -357,19 +359,55 @@ function editItem(t, dayId, itemId) {
     });
 }
 
-async function pickRestaurantForDay(t, dayId) {
+// ======================================================================
+// RESTAURANTS AND PLACES
+// Both live in the same store; places have kind: 'place'. Older records have no kind and are restaurants.
+// ======================================================================
+// Meal types: a restaurant can have more than one (e.g. a café for breakfast and dessert).
+const MEALS = [['breakfast', '🍳', 'Breakfast'], ['main', '🍽️', 'Lunch / dinner'], ['dessert', '🍰', 'Dessert']];
+const CATS = [['sight', '🏛️', 'Sight / landmark'], ['shop', '🛍️', 'Shop / market'], ['building', '🏙️', 'Building'], ['museum', '🖼️', 'Museum / gallery'], ['nature', '🌳', 'Park / nature'], ['activity', '🎟️', 'Activity'], ['other', '📌', 'Other']];
+const KINDS = {
+  food: {
+    tab: 'food', list: '#/food', newHash: '#/r-new', title: 'Restaurants', one: 'restaurant', icon: '🍽️',
+    chips: MEALS, field: 'meals', chipsLabel: 'Meal', anyChip: 'Any meal',
+    namePh: 'Ichiran Shibuya', addrPh: 'Near Shibuya station, B1 floor', notesPh: 'Opening hours, queue tips, cash only…', tagsPh: 'late night, vegetarian, needs booking',
+    frontBtn: '📷 Front of restaurant', frontPrompt: '📷 Add a photo of the front, so you can spot it on the street', changeFront: 'Change front photo',
+    galleryTitle: 'Food photos', galleryBtn: '🖼️ Food photos', galleryTip: 'Tip: screenshot dishes from Google Maps reviews or Instagram, then add them here.',
+    listA: 'Must try', listAForm: 'Must-try dishes (what people recommend)', listAEmpty: 'Nothing yet. Tap ✏️ to add what people recommend.', itemPh: 'Add a dish',
+    listB: 'My order', listBForm: 'What I want to order', listBEmpty: 'Nothing yet. Tap ✏️ to plan your order.', listBTip: 'Tick dishes off as you order them.',
+    searchPh: 'Search name, dish, city, tag, notes…', emptyTitle: 'No restaurants yet',
+  },
+  place: {
+    tab: 'places', list: '#/places', newHash: '#/p-new', title: 'Places', one: 'place', icon: '📍',
+    chips: CATS, field: 'cats', chipsLabel: 'Type of place', anyChip: 'Any type',
+    namePh: 'Wat Arun', addrPh: 'Near Tha Tien pier', notesPh: 'Opening hours, tickets, dress code, best time to go…', tagsPh: 'sunset, free entry, rainy day',
+    frontBtn: '📷 Main photo', frontPrompt: '📷 Add a photo so you can recognise it when you get there', changeFront: 'Change main photo',
+    galleryTitle: 'Photos', galleryBtn: '🖼️ More photos', galleryTip: 'Tip: save screenshots from Google Maps or Instagram, then add them here.',
+    listA: 'Highlights', listAForm: "Highlights (what not to miss)", listAEmpty: 'Nothing yet. Tap ✏️ to add what not to miss.', itemPh: 'Add something',
+    listB: 'My to-do list', listBForm: 'Things I want to do or buy here', listBEmpty: 'Nothing yet. Tap ✏️ to add things to do or buy.', listBTip: 'Tick things off as you go.',
+    searchPh: 'Search name, highlight, city, tag, notes…', emptyTitle: 'No places yet',
+  },
+};
+const kindOf = r => (r && r.kind === 'place' ? 'place' : 'food');
+const chipTags = r => { const K = KINDS[kindOf(r)]; return K.chips.filter(([k]) => (r[K.field] || []).includes(k)).map(([, ic, l]) => `<span class="tag">${ic} ${l}</span>`).join(''); };
+const chipNames = r => { const K = KINDS[kindOf(r)]; return K.chips.filter(([k]) => (r[K.field] || []).includes(k)).map(m => m[2]); };
+const chipIcon = r => { const K = KINDS[kindOf(r)]; return (K.chips.find(([k]) => (r[K.field] || []).includes(k)) || [, K.icon])[1]; };
+const ofKind = (list, kind) => list.filter(r => kindOf(r) === kind);
+
+async function pickForDay(t, dayId, kind) {
+  const K = KINDS[kind];
   const city = stopByDay(t)[dayId]?.city || '';
   const same = r => city && (r.city || '').toLowerCase() === city.toLowerCase() ? 0 : 1;
-  const list = (await all('restaurants')).sort((a, b) => same(a) - same(b) || a.name.localeCompare(b.name));
-  sheet(`<h2>Add a restaurant to this day</h2>
-    <div class="searchbar"><span>🔎</span><input id="ps" placeholder="Search your restaurants"></div>
+  const list = ofKind(await all('restaurants'), kind).sort((a, b) => same(a) - same(b) || a.name.localeCompare(b.name));
+  sheet(`<h2>Add a ${K.one} to this day</h2>
+    <div class="searchbar"><span>🔎</span><input id="ps" placeholder="Search your ${K.title.toLowerCase()}"></div>
     <div id="pl"></div>
-    <button class="btn block" id="pnew" style="margin-top:10px">+ New restaurant</button>`,
+    <button class="btn block" id="pnew" style="margin-top:10px">+ New ${K.one}</button>`,
     (el, close) => {
       const draw = () => {
         const q = $('#ps', el).value.toLowerCase();
-        const f = list.filter(r => !q || [r.name, r.city, r.cuisine].join(' ').toLowerCase().includes(q));
-        $('#pl', el).innerHTML = f.length ? `<ul class="list">${f.map(r => `<li data-id="${r.id}" style="cursor:pointer"><div class="grow"><b>${esc(r.name)}</b><div class="small muted">${esc([r.cuisine, r.city].filter(Boolean).join(' · '))}</div></div></li>`).join('')}</ul>` : '<p class="muted small">No matches.</p>';
+        const f = list.filter(r => !q || [r.name, r.city, r.cuisine, ...chipNames(r)].join(' ').toLowerCase().includes(q));
+        $('#pl', el).innerHTML = f.length ? `<ul class="list">${f.map(r => `<li data-id="${r.id}" style="cursor:pointer"><div class="grow"><b>${chipIcon(r)} ${esc(r.name)}</b><div class="small muted">${esc([r.cuisine, ...chipNames(r).slice(0, 1), r.city].filter(Boolean).join(' · '))}</div></div></li>`).join('')}</ul>` : '<p class="muted small">No matches.</p>';
       };
       draw(); $('#ps', el).oninput = draw;
       $('#pl', el).onclick = async e => {
@@ -377,16 +415,10 @@ async function pickRestaurantForDay(t, dayId) {
         t.days.find(x => x.id === dayId).items.push({ id: uid(), time: '', title: '', restaurantId: li.dataset.id, notes: '' });
         await put('trips', t); close(); render();
       };
-      $('#pnew', el).onclick = () => { close(); location.hash = `#/r-new?trip=${t.id}&day=${dayId}&city=${encodeURIComponent(city)}`; };
+      $('#pnew', el).onclick = () => { close(); location.hash = `${K.newHash}?trip=${t.id}&day=${dayId}&city=${encodeURIComponent(city)}`; };
     });
 }
 
-// ======================================================================
-// RESTAURANTS
-// ======================================================================
-// Meal types: a place can have more than one (e.g. a café for breakfast and dessert).
-const MEALS = [['breakfast', '🍳', 'Breakfast'], ['main', '🍽️', 'Lunch / dinner'], ['dessert', '🍰', 'Dessert']];
-const mealTags = r => MEALS.filter(([k]) => (r.meals || []).includes(k)).map(([, ic, l]) => `<span class="tag">${ic} ${l}</span>`).join('');
 // Cities for the dropdown: each trip's destinations first, then any other city already used.
 async function cityOptions(extra) {
   const seen = new Map(), groups = [];
@@ -400,58 +432,71 @@ async function cityOptions(extra) {
   add([...(await all('restaurants')).map(r => r.city), extra].sort(), 'Other cities');
   return { groups, canonical: c => seen.get((c || '').trim().toLowerCase()) || (c || '').trim() };
 }
-const foodState = { q: '', city: '', cuisine: '', show: 'all', sort: 'recent', trip: '', meal: '' };
-try { Object.assign(foodState, JSON.parse(localStorage.getItem('foodState') || '{}')); foodState.q = ''; } catch {}
 
-route(/^#\/food$/, async () => {
-  setTab('food'); setHeader('Restaurants');
-  const [list, trips] = await Promise.all([all('restaurants'), all('trips')]);
+const listStates = {};
+for (const kind of ['food', 'place']) {
+  const st = { q: '', city: '', cuisine: '', show: 'all', sort: 'recent', trip: '', chip: '' };
+  try { Object.assign(st, JSON.parse(localStorage.getItem(kind + 'State') || '{}')); st.q = ''; if (st.meal && !st.chip) st.chip = st.meal; } catch {}
+  listStates[kind] = st;
+}
+const saveState = kind => { try { localStorage.setItem(kind + 'State', JSON.stringify(listStates[kind])); } catch {} };
+
+route(/^#\/food$/, () => listView('food'));
+route(/^#\/places$/, () => listView('place'));
+
+async function listView(kind) {
+  const K = KINDS[kind], st = listStates[kind];
+  setTab(K.tab); setHeader(K.title);
+  const [everything, trips] = await Promise.all([all('restaurants'), all('trips')]);
+  const list = ofKind(everything, kind);
   const tripOf = {};
   for (const t of trips) for (const d of t.days || []) for (const it of d.items) if (it.restaurantId) (tripOf[it.restaurantId] ||= new Set()).add(t.id);
-  // A restaurant belongs to a trip if it's on one of its days OR it's in one of the trip's cities.
+  // Something belongs to a trip if it's on one of its days OR it's in one of the trip's cities.
   const tripCities = Object.fromEntries(trips.map(t => [t.id, new Set(tripStops(t).map(s => s.city.toLowerCase()))]));
-  if (foodState.trip && !tripCities[foodState.trip]) foodState.trip = ''; // trip was deleted
+  if (st.trip && !tripCities[st.trip]) st.trip = ''; // trip was deleted
   const cities = [...new Map(list.filter(r => r.city).map(r => [r.city.toLowerCase(), r.city])).values()].sort();
   const cuisines = [...new Set(list.map(r => r.cuisine).filter(Boolean))].sort();
 
   app.innerHTML = `
-    <div class="searchbar"><span>🔎</span><input id="q" type="search" placeholder="Search name, dish, city, tag, notes…" value="${esc(foodState.q)}"></div>
+    <div class="searchbar"><span>🔎</span><input id="q" type="search" placeholder="${esc(K.searchPh)}" value="${esc(st.q)}"></div>
     <div class="chips" id="cities" style="margin-top:8px">
-      <button class="chip ${!foodState.city ? 'on' : ''}" data-city="">All cities</button>
-      ${cities.map(c => `<button class="chip ${foodState.city === c ? 'on' : ''}" data-city="${esc(c)}">${esc(c)}</button>`).join('')}
+      <button class="chip ${!st.city ? 'on' : ''}" data-city="">All cities</button>
+      ${cities.map(c => `<button class="chip ${st.city === c ? 'on' : ''}" data-city="${esc(c)}">${esc(c)}</button>`).join('')}
     </div>
-    <div class="chips" id="mealf" style="flex-wrap:wrap">
-      <button class="chip ${!foodState.meal ? 'on' : ''}" data-meal="">Any meal</button>
-      ${MEALS.map(([k, ic, l]) => `<button class="chip ${foodState.meal === k ? 'on' : ''}" data-meal="${k}">${ic} ${l}</button>`).join('')}
+    <div class="chips" id="chipf" style="flex-wrap:wrap">
+      <button class="chip ${!st.chip ? 'on' : ''}" data-chip="">${K.anyChip}</button>
+      ${K.chips.map(([k, ic, l]) => `<button class="chip ${st.chip === k ? 'on' : ''}" data-chip="${k}">${ic} ${l}</button>`).join('')}
     </div>
     <div class="row" style="margin-top:6px">
-      <select id="cui" class="grow"><option value="">Any cuisine</option>${cuisines.map(c => `<option ${foodState.cuisine === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+      ${kind === 'food' ? `<select id="cui" class="grow"><option value="">Any cuisine</option>${cuisines.map(c => `<option ${st.cuisine === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>` : ''}
       <select id="show" class="grow">
         <option value="all">All</option><option value="todo">Not visited</option><option value="visited">Visited</option><option value="fav">4★ and up</option>
       </select>
     </div>
     <div class="row" style="margin-top:6px">
-      <select id="trip" class="grow"><option value="">Any trip</option>${trips.map(t => `<option value="${t.id}" ${foodState.trip === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
+      <select id="trip" class="grow"><option value="">Any trip</option>${trips.map(t => `<option value="${t.id}" ${st.trip === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
       <select id="sort" class="grow">
         <option value="recent">Newest first</option><option value="name">Name A–Z</option><option value="rating">Highest rated</option><option value="city">City</option>
       </select>
     </div>
     <div id="results"></div>`;
-  $('#show').value = foodState.show; $('#sort').value = foodState.sort;
+  $('#show').value = st.show; $('#sort').value = st.sort;
+  if (kind !== 'food') st.cuisine = '';
 
+  const clear = () => { Object.assign(st, { q: '', city: '', cuisine: '', chip: '', trip: '', show: 'all' }); saveState(kind); render(); };
   const draw = () => {
-    localStorage.setItem('foodState', JSON.stringify(foodState));
-    const words = foodState.q.toLowerCase().split(/\s+/).filter(Boolean);
+    saveState(kind);
+    const words = st.q.toLowerCase().split(/\s+/).filter(Boolean);
     let f = list.filter(r => {
-      if (foodState.city && (r.city || '').toLowerCase() !== foodState.city.toLowerCase()) return false;
-      if (foodState.cuisine && r.cuisine !== foodState.cuisine) return false;
-      if (foodState.meal && !(r.meals || []).includes(foodState.meal)) return false;
-      if (foodState.show === 'todo' && r.visited) return false;
-      if (foodState.show === 'visited' && !r.visited) return false;
-      if (foodState.show === 'fav' && (r.rating || 0) < 4) return false;
-      if (foodState.trip && !(tripOf[r.id]?.has(foodState.trip)) && !tripCities[foodState.trip].has((r.city || '').toLowerCase())) return false;
+      if (st.city && (r.city || '').toLowerCase() !== st.city.toLowerCase()) return false;
+      if (st.cuisine && r.cuisine !== st.cuisine) return false;
+      if (st.chip && !(r[K.field] || []).includes(st.chip)) return false;
+      if (st.show === 'todo' && r.visited) return false;
+      if (st.show === 'visited' && !r.visited) return false;
+      if (st.show === 'fav' && (r.rating || 0) < 4) return false;
+      if (st.trip && !(tripOf[r.id]?.has(st.trip)) && !tripCities[st.trip].has((r.city || '').toLowerCase())) return false;
       if (words.length) {
-        const hay = [r.name, r.city, r.cuisine, r.address, r.notes, ...(r.mustTry || []), ...(r.toOrder || []).map(x => x.text), ...(r.tags || []), ...MEALS.filter(([k]) => (r.meals || []).includes(k)).map(m => m[2])].join(' ').toLowerCase();
+        const hay = [r.name, r.city, r.cuisine, r.address, r.notes, ...(r.mustTry || []), ...(r.toOrder || []).map(x => x.text), ...(r.tags || []), ...chipNames(r)].join(' ').toLowerCase();
         return words.every(w => hay.includes(w));
       }
       return true;
@@ -461,46 +506,47 @@ route(/^#\/food$/, async () => {
       name: (a, b) => a.name.localeCompare(b.name),
       rating: (a, b) => (b.rating || 0) - (a.rating || 0) || a.name.localeCompare(b.name),
       city: (a, b) => (a.city || '~').localeCompare(b.city || '~') || a.name.localeCompare(b.name),
-    }[foodState.sort];
+    }[st.sort];
     f.sort(by);
     const box = $('#results');
     if (!list.length) {
-      box.innerHTML = `<div class="empty"><div class="big">🍽️</div><p><b>No restaurants yet</b><br>Tap + to add one, or share a place from Google Maps to Wayfare.</p></div>`;
+      box.innerHTML = `<div class="empty"><div class="big">${K.icon}</div><p><b>${K.emptyTitle}</b><br>Tap + to add one, or share a place from Google Maps to Wayfare.</p></div>`;
       return;
     }
-    const filtered = foodState.q || foodState.city || foodState.cuisine || foodState.meal || foodState.trip || foodState.show !== 'all';
+    const filtered = st.q || st.city || st.cuisine || st.chip || st.trip || st.show !== 'all';
     if (!f.length) {
-      box.innerHTML = `<div class="empty"><div class="big">🔍</div><p><b>No restaurants match these filters</b><br>You have ${list.length} saved.</p><button class="btn primary" id="clearf">Clear filters</button></div>`;
-      $('#clearf').onclick = () => { Object.assign(foodState, { q: '', city: '', cuisine: '', meal: '', trip: '', show: 'all' }); localStorage.setItem('foodState', JSON.stringify(foodState)); render(); };
+      box.innerHTML = `<div class="empty"><div class="big">🔍</div><p><b>No ${K.title.toLowerCase()} match these filters</b><br>You have ${list.length} saved.</p><button class="btn primary" id="clearf">Clear filters</button></div>`;
+      $('#clearf').onclick = clear;
       return;
     }
     box.innerHTML = `<p class="small muted row"><span class="grow">${f.length} of ${list.length}</span>${filtered ? '<a class="link" href="#" id="clearf">Clear filters</a>' : ''}</p>` + f.map(r => `
       <a class="card rcard" href="#/r/${r.id}">
-        ${r.frontPhotoId ? `<img class="thumb" data-pid="${r.frontPhotoId}" alt="">` : r.foodPhotoIds?.[0] ? `<img class="thumb" data-pid="${r.foodPhotoIds[0]}" alt="">` : '<div class="thumb ph">🍽️</div>'}
+        ${r.frontPhotoId ? `<img class="thumb" data-pid="${r.frontPhotoId}" alt="">` : r.foodPhotoIds?.[0] ? `<img class="thumb" data-pid="${r.foodPhotoIds[0]}" alt="">` : `<div class="thumb ph">${chipIcon(r)}</div>`}
         <div class="grow"><h3>${esc(r.name)} ${r.visited ? '✅' : ''}</h3>
-          <div class="small muted">${esc([r.cuisine, r.city].filter(Boolean).join(' · '))} ${r.price ? '· ' + '$'.repeat(r.price) : ''} ${stars(r.rating)}</div>
+          <div class="small muted">${esc([r.cuisine, r.city].filter(Boolean).join(' · '))} ${priceText(r)} ${stars(r.rating)}</div>
           ${r.mustTry?.length ? `<div class="small">⭐ ${esc(r.mustTry.slice(0, 3).join(', '))}${r.mustTry.length > 3 ? '…' : ''}</div>` : ''}
-          ${mealTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}
+          ${chipTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}
         </div></a>`).join('');
-    $('#clearf') && ($('#clearf').onclick = e => { e.preventDefault(); Object.assign(foodState, { q: '', city: '', cuisine: '', meal: '', trip: '', show: 'all' }); localStorage.setItem('foodState', JSON.stringify(foodState)); render(); });
+    $('#clearf') && ($('#clearf').onclick = e => { e.preventDefault(); clear(); });
     hydrateImgs(box);
   };
   draw();
-  $('#q').oninput = e => { foodState.q = e.target.value; draw(); };
-  $('#cities').onclick = e => { const c = e.target.closest('[data-city]'); if (!c) return; foodState.city = c.dataset.city; document.querySelectorAll('#cities .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); };
-  $('#mealf').onclick = e => { const c = e.target.closest('[data-meal]'); if (!c) return; foodState.meal = c.dataset.meal; document.querySelectorAll('#mealf .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); };
-  $('#cui').onchange = e => { foodState.cuisine = e.target.value; draw(); };
-  $('#show').onchange = e => { foodState.show = e.target.value; draw(); };
-  $('#sort').onchange = e => { foodState.sort = e.target.value; draw(); };
-  $('#trip').onchange = e => { foodState.trip = e.target.value; draw(); };
-  fab(() => (location.hash = '#/r-new'));
-});
+  $('#q').oninput = e => { st.q = e.target.value; draw(); };
+  $('#cities').onclick = e => { const c = e.target.closest('[data-city]'); if (!c) return; st.city = c.dataset.city; document.querySelectorAll('#cities .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); };
+  $('#chipf').onclick = e => { const c = e.target.closest('[data-chip]'); if (!c) return; st.chip = c.dataset.chip; document.querySelectorAll('#chipf .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); };
+  $('#cui') && ($('#cui').onchange = e => { st.cuisine = e.target.value; draw(); });
+  $('#show').onchange = e => { st.show = e.target.value; draw(); };
+  $('#sort').onchange = e => { st.sort = e.target.value; draw(); };
+  $('#trip').onchange = e => { st.trip = e.target.value; draw(); };
+  fab(() => (location.hash = K.newHash));
+}
 
-// Restaurant detail
+// Detail page (restaurant or place)
 route(/^#\/r\/([^/]+)$/, async id => {
-  setTab('food');
   const r = await get('restaurants', id);
   if (!r) return (location.hash = '#/food');
+  const K = KINDS[kindOf(r)];
+  setTab(K.tab);
   setHeader(r.name, { back: true, actions: `<a class="btn icon" href="#/r-edit/${r.id}" aria-label="Edit">✏️</a>` });
   const maps = mapsHref(r);
   const trips = await all('trips');
@@ -508,11 +554,11 @@ route(/^#\/r\/([^/]+)$/, async id => {
   for (const t of trips) (t.days || []).forEach((d, i) => { if (d.items.some(it => it.restaurantId === r.id)) onDays.push({ t, d, i }); });
 
   app.innerHTML = `
-    ${r.frontPhotoId ? `<img class="hero" data-pid="${r.frontPhotoId}" alt="Restaurant front" id="hero">` : `<button class="btn block" id="addfront" style="padding:28px">📷 Add a photo of the front, so you can spot it on the street</button>`}
+    ${r.frontPhotoId ? `<img class="hero" data-pid="${r.frontPhotoId}" alt="" id="hero">` : `<button class="btn block" id="addfront" style="padding:28px">${K.frontPrompt}</button>`}
     <div style="margin-top:12px">
-      <div class="small muted">${esc([r.cuisine, r.city].filter(Boolean).join(' · '))} ${r.price ? '· ' + '$'.repeat(r.price) : ''}</div>
+      <div class="small muted">${esc([r.cuisine, r.city].filter(Boolean).join(' · '))} ${priceText(r)}</div>
       ${r.address ? `<div class="small">${esc(r.address)}</div>` : ''}
-      <div style="margin-top:4px">${mealTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div>
+      <div style="margin-top:4px">${chipTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div>
     </div>
     <div class="row" style="margin-top:12px">
       ${maps ? `<a class="btn primary grow" href="${esc(maps)}" target="_blank" rel="noopener">📍 Open in Maps</a>` : ''}
@@ -520,20 +566,20 @@ route(/^#\/r\/([^/]+)$/, async id => {
     </div>
     ${r.visited || r.rating ? `<div class="card"><div class="small muted">Your rating</div><div class="starpick" id="sp">${[1, 2, 3, 4, 5].map(n => `<button data-n="${n}" class="${n <= (r.rating || 0) ? 'on' : ''}">★</button>`).join('')}</div></div>` : ''}
 
-    <h2>Must try</h2>
-    <div class="card">${r.mustTry?.length ? `<ul class="list">${r.mustTry.map(x => `<li>⭐ <span class="grow">${esc(x)}</span></li>`).join('')}</ul>` : '<span class="muted small">Nothing yet. Tap ✏️ to add what people recommend.</span>'}</div>
+    <h2>${K.listA}</h2>
+    <div class="card">${r.mustTry?.length ? `<ul class="list">${r.mustTry.map(x => `<li>⭐ <span class="grow">${esc(x)}</span></li>`).join('')}</ul>` : `<span class="muted small">${K.listAEmpty}</span>`}</div>
 
-    <h2>My order</h2>
-    <div class="card">${r.toOrder?.length ? `<ul class="list" id="ord">${r.toOrder.map((x, i) => `<li><input type="checkbox" data-i="${i}" ${x.done ? 'checked' : ''}><span class="grow ${x.done ? 'done' : ''}">${esc(x.text)}</span></li>`).join('')}</ul><p class="small muted" style="margin:8px 0 0">Tick dishes off as you order them.</p>` : '<span class="muted small">Nothing yet. Tap ✏️ to plan your order.</span>'}</div>
+    <h2>${K.listB}</h2>
+    <div class="card">${r.toOrder?.length ? `<ul class="list" id="ord">${r.toOrder.map((x, i) => `<li><input type="checkbox" data-i="${i}" ${x.done ? 'checked' : ''}><span class="grow ${x.done ? 'done' : ''}">${esc(x.text)}</span></li>`).join('')}</ul><p class="small muted" style="margin:8px 0 0">${K.listBTip}</p>` : `<span class="muted small">${K.listBEmpty}</span>`}</div>
 
-    <h2>Food photos</h2>
+    <h2>${K.galleryTitle}</h2>
     <div class="gallery" id="gal">${(r.foodPhotoIds || []).map(p => `<div class="g"><img data-pid="${p}" alt="" data-view="${p}"></div>`).join('')}</div>
     <div class="row" style="margin-top:8px"><button class="btn grow" id="addfood">🖼️ Add from gallery</button><button class="btn grow" id="snapfood">📷 Camera</button></div>
-    <p class="small muted">Tip: screenshot dishes from Google Maps reviews or Instagram, then add them here.</p>
+    <p class="small muted">${K.galleryTip}</p>
 
     ${r.notes ? `<h2>Notes</h2><div class="card" style="white-space:pre-wrap">${esc(r.notes)}</div>` : ''}
     ${onDays.length ? `<h2>In your itinerary</h2><div class="card">${onDays.map(({ t, d, i }) => `<div><a class="link" href="#/trip/${t.id}">${esc(t.name)}: Day ${i + 1}, ${fmtDate(d.date)}</a></div>`).join('')}</div>` : ''}
-    ${r.frontPhotoId ? `<p style="margin-top:16px"><button class="btn" id="changefront">Change front photo</button></p>` : ''}
+    ${r.frontPhotoId ? `<p style="margin-top:16px"><button class="btn" id="changefront">${K.changeFront}</button></p>` : ''}
   `;
   hydrateImgs();
 
@@ -551,9 +597,10 @@ route(/^#\/r\/([^/]+)$/, async id => {
   $('#gal').onclick = e => { const v = e.target.closest('[data-view]'); if (v) viewer(v.dataset.view); };
 });
 
-// Restaurant add/edit form
-route(/^#\/r-new(?:\?(.*))?$/, async qs => restaurantForm(null, new URLSearchParams(qs || '')));
-route(/^#\/r-edit\/([^/]+)$/, async id => restaurantForm(await get('restaurants', id)));
+// Add/edit form
+route(/^#\/r-new(?:\?(.*))?$/, async qs => itemForm('food', null, new URLSearchParams(qs || '')));
+route(/^#\/p-new(?:\?(.*))?$/, async qs => itemForm('place', null, new URLSearchParams(qs || '')));
+route(/^#\/r-edit\/([^/]+)$/, async id => { const r = await get('restaurants', id); itemForm(kindOf(r), r); });
 
 function listEditor(id, items, placeholder) {
   return `<div class="listedit" id="${id}">${[...items, ''].map(v => `<div class="li"><input value="${esc(v)}" placeholder="${esc(placeholder)}"></div>`).join('')}</div>`;
@@ -577,52 +624,64 @@ function parseShare(p) {
   return { name: name.replace(/https?:\/\/\S+/, '').trim(), mapsUrl: url };
 }
 
-async function restaurantForm(existing, params = new URLSearchParams()) {
-  setTab('food');
+async function itemForm(kind, existing, params = new URLSearchParams()) {
+  const K = KINDS[kind];
+  setTab(K.tab);
   const shared = params.get('share') ? parseShare(params) : {};
-  const r = existing || { id: uid(), name: shared.name || '', city: params.get('city') || '', meals: [], cuisine: '', address: '', mapsUrl: shared.mapsUrl || '', mustTry: [], toOrder: [], tags: [], notes: '', price: 0, rating: 0, visited: false, frontPhotoId: null, foodPhotoIds: [], created: Date.now() };
-  setHeader(existing ? 'Edit restaurant' : 'New restaurant', { back: true });
-  const all_ = await all('restaurants');
+  const r = existing || { id: uid(), kind: kind === 'place' ? 'place' : undefined, name: shared.name || '', city: params.get('city') || '', [K.field]: [], cuisine: '', address: '', mapsUrl: shared.mapsUrl || '', mustTry: [], toOrder: [], tags: [], notes: '', price: 0, rating: 0, visited: false, frontPhotoId: null, foodPhotoIds: [], created: Date.now() };
+  setHeader(existing ? `Edit ${K.one}` : `New ${K.one}`, { back: true });
+  const all_ = ofKind(await all('restaurants'), 'food');
   const co = await cityOptions(r.city);
   const curCity = co.canonical(r.city);
   const cuisines = [...new Set(all_.map(x => x.cuisine).filter(Boolean))];
   let pendingFront = null, pendingFood = [];
+  const otherKind = kind === 'food' ? 'place' : 'food';
 
   app.innerHTML = `
+    ${!existing ? `<div class="chips" style="margin-bottom:4px"><span class="small muted" style="align-self:center">Save as</span>
+      <button class="chip ${kind === 'food' ? 'on' : ''}" data-kind="food">🍽️ Restaurant</button><button class="chip ${kind === 'place' ? 'on' : ''}" data-kind="place">📍 Place</button></div>` : ''}
     ${shared.mapsUrl ? '<div class="card small">📍 Added from Google Maps. Check the name, then fill in the rest.</div>' : ''}
-    <label class="f">Name</label><input id="n" value="${esc(r.name)}" placeholder="Ichiran Shibuya">
+    <label class="f">Name</label><input id="n" value="${esc(r.name)}" placeholder="${esc(K.namePh)}">
     <label class="f">Google Maps link</label><input id="m" value="${esc(r.mapsUrl)}" inputmode="url" placeholder="Paste from Maps → Share → Copy link">
     <label class="f">City</label>
     <select id="c"><option value="">Choose a city</option>
       ${co.groups.map(([label, cs]) => `<optgroup label="${esc(label)}">${cs.map(c => `<option ${c === curCity ? 'selected' : ''}>${esc(c)}</option>`).join('')}</optgroup>`).join('')}
       <option value="__new">＋ Type a new city…</option></select>
     <input id="cnew" placeholder="City name" hidden style="margin-top:6px">
-    <label class="f">Meal</label>
-    <div class="chips" id="meals" style="flex-wrap:wrap">${MEALS.map(([k, ic, l]) => `<button type="button" class="chip ${(r.meals || []).includes(k) ? 'on' : ''}" data-meal="${k}">${ic} ${l}</button>`).join('')}</div>
-    <label class="f">Cuisine</label><input id="cu" list="cul" value="${esc(r.cuisine)}" placeholder="Ramen">
-    <datalist id="cul">${cuisines.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
-    <label class="f">Area / address (optional)</label><input id="a" value="${esc(r.address)}" placeholder="Near Shibuya station, B1 floor">
-    <label class="f">Price</label><select id="pr"><option value="0">Not set</option>${[1, 2, 3, 4].map(n => `<option value="${n}" ${r.price === n ? 'selected' : ''}>${'$'.repeat(n)}</option>`).join('')}</select>
+    <label class="f">${K.chipsLabel}</label>
+    <div class="chips" id="kchips" style="flex-wrap:wrap">${K.chips.map(([k, ic, l]) => `<button type="button" class="chip ${(r[K.field] || []).includes(k) ? 'on' : ''}" data-chip="${k}">${ic} ${l}</button>`).join('')}</div>
+    ${kind === 'food' ? `<label class="f">Cuisine</label><input id="cu" list="cul" value="${esc(r.cuisine)}" placeholder="Ramen">
+    <datalist id="cul">${cuisines.map(c => `<option value="${esc(c)}">`).join('')}</datalist>` : ''}
+    <label class="f">Area / address (optional)</label><input id="a" value="${esc(r.address)}" placeholder="${esc(K.addrPh)}">
+    <label class="f">Price</label><select id="pr"><option value="0">Not set</option>${kind === 'place' ? '<option value="-1" ' + (r.price === -1 ? 'selected' : '') + '>Free</option>' : ''}${[1, 2, 3, 4].map(n => `<option value="${n}" ${r.price === n ? 'selected' : ''}>${'$'.repeat(n)}</option>`).join('')}</select>
 
-    <label class="f">Must-try dishes (what people recommend)</label>${listEditor('mt', r.mustTry || [], 'Add a dish')}
-    <label class="f">What I want to order</label>${listEditor('to', (r.toOrder || []).map(x => x.text), 'Add a dish')}
-    <label class="f">Tags (comma separated)</label><input id="tg" value="${esc((r.tags || []).join(', '))}" placeholder="late night, vegetarian, needs booking">
-    <label class="f">Notes</label><textarea id="no" placeholder="Opening hours, queue tips, cash only…">${esc(r.notes)}</textarea>
+    <label class="f">${K.listAForm}</label>${listEditor('mt', r.mustTry || [], K.itemPh)}
+    <label class="f">${K.listBForm}</label>${listEditor('to', (r.toOrder || []).map(x => x.text), K.itemPh)}
+    <label class="f">Tags (comma separated)</label><input id="tg" value="${esc((r.tags || []).join(', '))}" placeholder="${esc(K.tagsPh)}">
+    <label class="f">Notes</label><textarea id="no" placeholder="${esc(K.notesPh)}">${esc(r.notes)}</textarea>
 
     ${existing ? '' : `<label class="f">Photos</label>
-      <div class="row"><button class="btn grow" id="pf">📷 Front of restaurant</button><button class="btn grow" id="pfd">🖼️ Food photos</button></div>
+      <div class="row"><button class="btn grow" id="pf">${K.frontBtn}</button><button class="btn grow" id="pfd">${K.galleryBtn}</button></div>
       <p class="small muted" id="pinfo"></p>`}
     <div class="row" style="margin-top:18px">${existing ? '<button class="btn danger" id="del">Delete</button>' : ''}<span class="grow"></span><button class="btn primary" id="save">Save</button></div>`;
 
-  wireListEditor($('#mt'), 'Add a dish'); wireListEditor($('#to'), 'Add a dish');
+  // Switch between restaurant and place while adding, keeping what's typed in the name and link.
+  app.querySelectorAll('[data-kind]').forEach(b => b.onclick = () => {
+    if (b.dataset.kind === kind) return;
+    const p = new URLSearchParams(params); p.delete('share'); p.delete('title'); p.delete('text'); p.delete('url');
+    p.set('name', $('#n').value); p.set('maps', $('#m').value);
+    history.replaceState(null, '', KINDS[otherKind].newHash + '?' + p.toString()); render();
+  });
+  if (!existing && params.get('name') !== null) { $('#n').value = params.get('name'); $('#m').value = params.get('maps') || ''; }
+  wireListEditor($('#mt'), K.itemPh); wireListEditor($('#to'), K.itemPh);
   if (!co.groups.length) { $('#c').value = '__new'; $('#cnew').hidden = false; }
   $('#c').onchange = e => { const isNew = e.target.value === '__new'; $('#cnew').hidden = !isNew; if (isNew) $('#cnew').focus(); };
-  $('#meals').onclick = e => { const c = e.target.closest('[data-meal]'); if (c) c.classList.toggle('on'); };
+  $('#kchips').onclick = e => { const c = e.target.closest('[data-chip]'); if (c) c.classList.toggle('on'); };
   if (!existing) {
-    const info = () => { $('#pinfo').textContent = [pendingFront ? 'Front photo added' : '', pendingFood.length ? pendingFood.length + ' food photo(s) added' : ''].filter(Boolean).join(' · '); };
+    const info = () => { $('#pinfo').textContent = [pendingFront ? 'Main photo added' : '', pendingFood.length ? pendingFood.length + ' photo(s) added' : ''].filter(Boolean).join(' · '); };
     $('#pf').onclick = async () => { const f = await pickFiles(false); if (f.length) { pendingFront = f[0]; info(); } };
     $('#pfd').onclick = async () => { const f = await pickFiles(true); pendingFood.push(...f); info(); };
-    if (!r.name) $('#n').focus();
+    if (!$('#n').value) $('#n').focus();
   }
   $('#save').onclick = async () => {
     const name = $('#n').value.trim();
@@ -630,11 +689,12 @@ async function restaurantForm(existing, params = new URLSearchParams()) {
     const prevOrder = Object.fromEntries((r.toOrder || []).map(x => [x.text, x.done]));
     Object.assign(r, {
       name, mapsUrl: $('#m').value.trim(), city: $('#c').value === '__new' ? co.canonical($('#cnew').value) : $('#c').value,
-      meals: [...document.querySelectorAll('#meals .chip.on')].map(c => c.dataset.meal), cuisine: $('#cu').value.trim(),
+      [K.field]: [...document.querySelectorAll('#kchips .chip.on')].map(c => c.dataset.chip), cuisine: $('#cu') ? $('#cu').value.trim() : '',
       address: $('#a').value.trim(), price: +$('#pr').value, mustTry: readList($('#mt')),
       toOrder: readList($('#to')).map(text => ({ text, done: !!prevOrder[text] })),
       tags: splitList($('#tg').value), notes: $('#no').value.trim(), updated: Date.now(),
     });
+    if (kind === 'place') r.kind = 'place'; else delete r.kind;
     $('#save').disabled = true;
     if (pendingFront) r.frontPhotoId = (await savePhotos([pendingFront], 'Front'))[0];
     if (pendingFood.length) r.foodPhotoIds = [...r.foodPhotoIds, ...(await savePhotos(pendingFood))];
@@ -657,7 +717,7 @@ async function restaurantForm(existing, params = new URLSearchParams()) {
       if (changed) await put('trips', t);
     }
     await del('restaurants', r.id);
-    history.replaceState(null, '', '#/food'); render();
+    history.replaceState(null, '', K.list); render();
   };
 }
 
@@ -675,7 +735,7 @@ route(/^#\/settings$/, async () => {
   const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : false;
   const last = localStorage.getItem('lastBackup');
   app.innerHTML = `
-    <div class="card"><b>On this phone</b><div class="small muted">${trips.length} trips · ${rests.length} restaurants · ${photos} photos ${usage ? '· ' + usage : ''}</div>
+    <div class="card"><b>On this phone</b><div class="small muted">${trips.length} trips · ${ofKind(rests, 'food').length} restaurants · ${ofKind(rests, 'place').length} places · ${photos} photos ${usage ? '· ' + usage : ''}</div>
       <div class="small" style="margin-top:6px">${persisted ? '🔒 Protected from automatic clean-up' : '⚠️ Not yet protected from automatic clean-up.'}</div>
       ${persisted ? '' : '<button class="btn" id="persist" style="margin-top:8px">Protect my data</button>'}</div>
     <div class="card"><b>Back up</b><p class="small muted">Saves everything, photos included, into one file. Keep it in Google Drive so you can restore it on a new phone.${last ? '<br>Last backup: ' + new Date(+last).toLocaleString() : ''}</p>
@@ -683,7 +743,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.5</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.6</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
@@ -708,7 +768,7 @@ route(/^#\/settings$/, async () => {
         for (const p of data.photos || []) await put('photos', { id: p.id, caption: p.caption, created: p.created, blob: await dataURLToBlob(p.data) });
         for (const r of data.restaurants || []) await put('restaurants', r);
         for (const t of data.trips || []) await put('trips', t);
-        toast(`Restored ${data.restaurants?.length || 0} restaurants, ${data.trips?.length || 0} trips`); render();
+        toast(`Restored ${data.restaurants?.length || 0} restaurants and places, ${data.trips?.length || 0} trips`); render();
       } catch (e) { toast('Could not read that file: ' + e.message); }
     };
     i.click();
