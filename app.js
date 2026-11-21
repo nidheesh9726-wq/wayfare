@@ -134,17 +134,37 @@ function myPosition() {
   });
 }
 // Look a name up on OpenStreetMap (needs internet; sends only the name and city you typed).
-async function lookupPlace(q) {
+async function nominatim(q) {
   const res = await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=' + encodeURIComponent(q), { headers: { Accept: 'application/json' } });
   if (!res.ok) throw new Error('Lookup failed');
   return (await res.json()).map(x => ({ lat: +x.lat, lng: +x.lon, label: x.display_name }));
 }
+// Photon searches the same map data but copes better with partial and misspelt names.
+async function photon(q) {
+  const res = await fetch('https://photon.komoot.io/api/?limit=5&q=' + encodeURIComponent(q));
+  if (!res.ok) throw new Error('Lookup failed');
+  return ((await res.json()).features || []).map(f => {
+    const p = f.properties || {};
+    return { lat: f.geometry.coordinates[1], lng: f.geometry.coordinates[0], label: [p.name, p.street && [p.housenumber, p.street].filter(Boolean).join(' '), p.district, p.city, p.country].filter(Boolean).join(', ') };
+  });
+}
+async function lookupPlace(q) {
+  const tries = [() => nominatim(q), () => photon(q)];
+  let found = [], failures = 0;
+  for (const t of tries) {
+    try { for (const x of await t()) if (!found.some(y => Math.abs(y.lat - x.lat) < 1e-4 && Math.abs(y.lng - x.lng) < 1e-4)) found.push(x); }
+    catch { failures++; }
+    if (found.length >= 3) break;
+  }
+  if (!found.length && failures === tries.length) throw new Error('offline');
+  return found.slice(0, 6);
+}
 // Location block used on the form and the detail page. onSet({lat,lng,src}) is called when a location is chosen.
 function locationBlock(el, r, getQuery, onSet) {
   const draw = () => {
-    el.innerHTML = `<div class="small">${hasLoc(r) ? `📍 Location saved <span class="muted">(${esc({ link: 'from the Maps link', gps: 'from your phone’s GPS', lookup: 'looked up by name', typed: 'typed in' }[r.locSrc] || 'saved')})</span> · <a class="link" href="#" data-loc="clear">Remove</a>`
+    el.innerHTML = `<div class="small">${hasLoc(r) ? `📍 Location saved <span class="muted">(${esc({ link: 'from the Maps link', gps: 'from your phone’s GPS', lookup: 'looked up by name', typed: 'pasted coordinates' }[r.locSrc] || 'saved')})</span> · <a class="link" href="#" data-loc="clear">Remove</a>`
       : '<span class="muted">No location yet. Add one to see what’s nearby.</span>'}</div>
-      <div class="row" style="margin-top:6px;flex-wrap:wrap"><button type="button" class="btn grow" data-loc="gps">📡 I’m here now</button><button type="button" class="btn grow" data-loc="lookup">🔎 Look up by name</button></div>
+      <div class="row" style="margin-top:6px;flex-wrap:wrap"><button type="button" class="btn grow" data-loc="lookup">🔎 Look up by name</button><button type="button" class="btn grow" data-loc="paste">📋 Paste coordinates</button><button type="button" class="btn grow" data-loc="gps">📡 I’m here now</button></div>
       <div id="locres"></div>`;
   };
   draw();
@@ -153,6 +173,21 @@ function locationBlock(el, r, getQuery, onSet) {
     e.preventDefault();
     const set = (lat, lng, src) => { Object.assign(r, { lat, lng, locSrc: src }); onSet && onSet(); draw(); toast('Location saved'); };
     if (b.dataset.loc === 'clear') { delete r.lat; delete r.lng; delete r.locSrc; onSet && onSet(); draw(); }
+    if (b.dataset.loc === 'paste') {
+      const box = $('#locres', el);
+      box.innerHTML = `<div class="card small" style="margin:8px 0 0">
+        <b>Get the coordinates from Google Maps</b>
+        <ol style="margin:6px 0;padding-left:20px"><li>Find the spot in Google Maps.</li><li><b>Press and hold</b> on its exact spot until a red pin drops.</li><li>The numbers appear in the search bar at the top, like <code>13.7527, 100.5048</code>. Tap them and copy.</li></ol>
+        <div class="row"><input id="coordin" class="grow" inputmode="decimal" placeholder="13.7527, 100.5048">${navigator.clipboard?.readText ? '<button type="button" class="btn" data-loc="clip">Paste</button>' : ''}</div>
+        <p class="muted" id="coordmsg" style="margin:6px 0 0">A full Google Maps link works here too.</p></div>`;
+      const inp = $('#coordin', el);
+      inp.oninput = () => { const c = coordsFromText(inp.value); if (c) set(c.lat, c.lng, 'typed'); else if (inp.value.trim()) $('#coordmsg', el).textContent = 'That doesn’t look like coordinates yet. They should look like 13.7527, 100.5048'; };
+      inp.focus();
+    }
+    if (b.dataset.loc === 'clip') {
+      try { const t = await navigator.clipboard.readText(); const c = coordsFromText(t); if (c) set(c.lat, c.lng, 'typed'); else toast('Copied text isn’t coordinates. Copy the numbers from Google Maps first.'); }
+      catch { toast('Couldn’t read the clipboard. Long-press the box and choose Paste.'); }
+    }
     if (b.dataset.loc === 'gps') { try { toast('Finding you…'); const p = await myPosition(); set(p.lat, p.lng, 'gps'); } catch (err) { toast(err.message); } }
     if (b.dataset.loc === 'lookup') {
       const q = getQuery(); if (!q.trim()) { toast('Add a name first'); return; }
@@ -162,9 +197,9 @@ function locationBlock(el, r, getQuery, onSet) {
         const name = q.split(',')[0];
         if (!found.length && name !== q) found = await lookupPlace(name);
         box.innerHTML = found.length ? `<p class="small muted" style="margin:8px 0 4px">Tap the right one:</p><ul class="list">${found.map((x, i) => `<li data-pick="${i}" style="cursor:pointer"><span class="small">${esc(x.label)}</span></li>`).join('')}</ul>`
-          : '<p class="small muted">Nothing found. Try “I’m here now” when you visit, or paste a full Google Maps link.</p>';
+          : '<p class="small muted">Nothing found. Small restaurants often aren’t on these free maps. Use 📋 Paste coordinates instead. It takes about 10 seconds.</p>';
         box.dataset.found = JSON.stringify(found);
-      } catch { box.innerHTML = '<p class="small muted">Couldn’t look it up. Check your internet connection.</p>'; }
+      } catch { box.innerHTML = '<p class="small muted">Couldn’t look it up. Check your internet connection, or use 📋 Paste coordinates.</p>'; }
     }
     if (b.dataset.pick !== undefined) { const x = JSON.parse($('#locres', el).dataset.found)[+b.dataset.pick]; set(x.lat, x.lng, 'lookup'); }
   };
@@ -687,7 +722,7 @@ route(/^#\/r\/([^/]+)$/, async id => {
           <div class="grow"><b>${esc(x.name)}</b> ${x.visited ? '✅' : ''}<div class="small muted">${fmtDist(km)}</div><div>${chipTags(x)}</div></div></a></li>`).join('')}</ul>`
         : `<p class="small muted">No ${KINDS[nearKind].title.toLowerCase()} with a location yet.</p>`}
       ${missing ? `<p class="small muted" style="margin:8px 0 0">${missing} other ${missing === 1 ? KINDS[nearKind].one : KINDS[nearKind].title.toLowerCase()} ${missing === 1 ? 'has' : 'have'} no location yet, so ${missing === 1 ? 'it isn’t' : 'they aren’t'} included.</p>` : ''}
-      <p class="small muted" style="margin:8px 0 0">📍 This ${KINDS[kindOf(r)].one}’s location: ${esc({ link: 'from the Maps link', gps: 'from your phone’s GPS', lookup: 'looked up by name', typed: 'typed in' }[r.locSrc] || 'saved')}. Change it with ✏️.</p>`;
+      <p class="small muted" style="margin:8px 0 0">📍 This ${KINDS[kindOf(r)].one}’s location: ${esc({ link: 'from the Maps link', gps: 'from your phone’s GPS', lookup: 'looked up by name', typed: 'pasted coordinates' }[r.locSrc] || 'saved')}. Change it with ✏️.</p>`;
     hydrateImgs(box);
     $('#nk').onclick = e => { const c = e.target.closest('[data-nk]'); if (c) { nearKind = c.dataset.nk; drawNearby(); } };
   };
@@ -846,7 +881,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.7</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.8</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
