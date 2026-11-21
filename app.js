@@ -150,7 +150,7 @@ route(/^#\/trips$/, async () => {
       return `<a class="card rcard" href="#/trip/${t.id}">
         <div class="thumb ph">✈️</div>
         <div class="grow"><h3>${esc(t.name)}</h3>
-        <div class="muted small">${esc(t.destination || '')}</div>
+        <div class="muted small">${esc(stopsSummary(t))}</div>
         <div class="small">${t.start ? fmtDate(t.start) + ' – ' + fmtDate(t.end) : ''} · ${nDays} day${nDays === 1 ? '' : 's'}</div>
         ${status ? `<span class="tag">${status}</span>` : ''}</div></a>`;
     }).join('');
@@ -168,21 +168,84 @@ function buildDays(start, end, existing = []) {
   return out.sort((a, b) => a.date.localeCompare(b.date));
 }
 
+// A trip is split into destinations (stops), each with a number of days.
+// Days are handed out in order from the first day: Tokyo 3, Kyoto 2 → days 1–3 Tokyo, 4–5 Kyoto.
+function tripStops(t) {
+  if (!t.stops) t.stops = splitList(t.destination).map(city => ({ id: uid(), city, days: 0 }));
+  return t.stops;
+}
+function dayCount(start, end) {
+  if (!start || !end || end < start) return 0;
+  return Math.round((new Date(end + 'T00:00:00') - new Date(start + 'T00:00:00')) / 864e5) + 1;
+}
+function stopByDay(t) {
+  const out = {}, inRange = (t.days || []).filter(d => d.date >= t.start && d.date <= t.end);
+  let i = 0;
+  for (const s of tripStops(t)) for (let k = 0; k < s.days && i < inRange.length; k++) out[inRange[i++].id] = s;
+  return out;
+}
+const stopsSummary = t => tripStops(t).map(s => s.city).filter(Boolean).join(' → ') || t.destination || '';
+
 function editTrip(trip) {
-  const t = trip || { id: uid(), name: '', destination: '', start: '', end: '', days: [], created: Date.now() };
+  const t = trip || { id: uid(), name: '', destination: '', stops: [], start: '', end: '', days: [], created: Date.now() };
+  let stops = tripStops(t).map(s => ({ ...s }));
+  if (!stops.length) stops.push({ id: uid(), city: '', days: 1 });
   sheet(`<h2>${trip ? 'Edit trip' : 'New trip'}</h2>
     <label class="f">Trip name</label><input id="tn" value="${esc(t.name)}" placeholder="Japan, spring 2027">
-    <label class="f">Destination(s)</label><input id="td" value="${esc(t.destination)}" placeholder="Tokyo, Kyoto, Osaka">
     <div class="row"><div class="grow"><label class="f">First day</label><input id="ts" type="date" value="${esc(t.start)}"></div>
     <div class="grow"><label class="f">Last day</label><input id="te" type="date" value="${esc(t.end)}"></div></div>
-    <p class="small muted">A page is created for every day between these dates.</p>
+    <label class="f">Destinations, in order</label>
+    <div id="stops"></div>
+    <button class="btn block" id="addstop" style="margin-top:6px">+ Add destination</button>
+    <p class="small" id="stopinfo"></p>
     <div class="row" style="margin-top:16px">${trip ? '<button class="btn danger" id="tdel">Delete</button>' : ''}<span class="grow"></span><button class="btn primary" id="tsave">Save</button></div>`,
     (el, close) => {
+      const box = $('#stops', el), info = $('#stopinfo', el);
+      const total = () => dayCount($('#ts', el).value, $('#te', el).value);
+      const used = () => stops.reduce((n, s) => n + (s.days || 0), 0);
+      const drawInfo = () => {
+        const T = total(), U = used(), start = $('#ts', el).value;
+        if (!T && start && U) info.innerHTML = `<span class="muted">Last day will be set to ${fmtDate(addDays(start, U - 1))} (${U} days).</span>`;
+        else if (!T) info.innerHTML = '<span class="muted">Pick the trip dates, then share the days out between destinations.</span>';
+        else if (U > T) info.innerHTML = `<b style="color:var(--danger)">${U} of ${T} days assigned: ${U - T} too many.</b> Remove some days or move the last day later.`;
+        else info.innerHTML = `<b>${U} of ${T} days assigned</b>${U < T ? ` <span class="muted">· ${T - U} left to assign</span>` : ' ✓'}`;
+      };
+      const draw = () => {
+        box.innerHTML = stops.map((s, i) => `<div class="stop" data-i="${i}">
+          <input class="grow" data-k="city" value="${esc(s.city)}" placeholder="${['Tokyo', 'Kyoto', 'Osaka', 'Nara'][i % 4]}">
+          <div class="stepper"><button class="btn icon" data-act="minus" aria-label="Fewer days">−</button><span><b>${s.days || 0}</b><small>day${s.days === 1 ? '' : 's'}</small></span><button class="btn icon" data-act="plus" aria-label="More days">+</button></div>
+          ${i > 0 ? `<button class="btn icon" data-act="up" aria-label="Move up">↑</button>` : ''}
+          <button class="btn icon" data-act="remove" aria-label="Remove">✕</button></div>`).join('');
+        drawInfo();
+      };
+      draw();
+      box.addEventListener('input', e => { const i = +e.target.closest('.stop').dataset.i; stops[i].city = e.target.value; });
+      box.addEventListener('click', e => {
+        const b = e.target.closest('[data-act]'); if (!b) return;
+        const i = +b.closest('.stop').dataset.i, s = stops[i], T = total();
+        if (b.dataset.act === 'plus') { if (T && used() >= T) { toast(`All ${T} days are already assigned`); return; } s.days = (s.days || 0) + 1; }
+        if (b.dataset.act === 'minus') s.days = Math.max(0, (s.days || 0) - 1);
+        if (b.dataset.act === 'up') [stops[i - 1], stops[i]] = [stops[i], stops[i - 1]];
+        if (b.dataset.act === 'remove') stops.splice(i, 1);
+        draw();
+      });
+      $('#addstop', el).onclick = () => {
+        const T = total(), left = T ? Math.max(0, T - used()) : 1;
+        stops.push({ id: uid(), city: '', days: left }); draw();
+        box.lastElementChild.querySelector('input').focus();
+      };
+      $('#ts', el).onchange = $('#te', el).onchange = drawInfo;
       $('#tsave', el).onclick = async () => {
+        let start = $('#ts', el).value, end = $('#te', el).value;
+        if (start && end && end < start) [start, end] = [end, start];
+        const cleaned = stops.filter(s => s.city.trim()).map(s => ({ ...s, city: s.city.trim() }));
+        const U = cleaned.reduce((n, s) => n + s.days, 0);
+        if (start && !end) end = addDays(start, Math.max(U, 1) - 1);
+        const T = dayCount(start, end);
+        if (T && U > T) { toast(`That's ${U - T} day(s) more than the trip has`); return; }
         t.name = $('#tn', el).value.trim() || 'Untitled trip';
-        t.destination = $('#td', el).value.trim();
-        t.start = $('#ts', el).value; t.end = $('#te', el).value || t.start;
-        if (t.end < t.start) [t.start, t.end] = [t.end, t.start];
+        t.start = start; t.end = end; t.stops = cleaned;
+        t.destination = cleaned.map(s => s.city).join(', ');
         t.days = buildDays(t.start, t.end, t.days);
         await put('trips', t); close();
         trip ? render() : (location.hash = '#/trip/' + t.id);
@@ -207,9 +270,22 @@ route(/^#\/trip\/([^/]+)$/, async id => {
     app.innerHTML = `<div class="empty"><div class="big">📅</div><p>Set the trip dates to get a page per day.</p></div>`;
     return;
   }
-  app.innerHTML = `<p class="muted small">${esc(t.destination || '')}</p>` + t.days.map((d, i) => {
+  const sbd = stopByDay(t);
+  const stopDates = {};
+  for (const d of t.days) { const s = sbd[d.id]; if (s) (stopDates[s.id] ||= []).push(d.date); }
+  const unassigned = t.days.filter(d => !sbd[d.id] && d.date >= t.start && d.date <= t.end).length;
+  let prevStop;
+  app.innerHTML = `<p class="muted small">${esc(stopsSummary(t))}${unassigned && tripStops(t).length ? ` · <a class="link" href="#" id="assign">${unassigned} day${unassigned === 1 ? '' : 's'} not assigned to a city</a>` : ''}</p>` + t.days.map((d, i) => {
+    const s = sbd[d.id];
+    let head = '';
+    if ((s && s !== prevStop) || (!s && prevStop)) {
+      const ds = s && stopDates[s.id];
+      head = s ? `<div class="stophead"><span>📍 ${esc(s.city)}</span><span class="muted small">${ds.length} day${ds.length === 1 ? '' : 's'} · ${fmtDate(ds[0], { day: 'numeric', month: 'short' })}${ds.length > 1 ? ' – ' + fmtDate(ds[ds.length - 1], { day: 'numeric', month: 'short' }) : ''}</span></div>`
+        : `<div class="stophead"><span class="muted">No city set</span></div>`;
+    }
+    prevStop = s;
     const items = [...d.items].sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
-    return `<section class="card day" id="d-${d.id}">
+    return head + `<section class="card day" id="d-${d.id}">
       <div class="row"><div class="grow"><h3>Day ${i + 1} · ${fmtDate(d.date)} ${d.date === today ? '<span class="tag">Today</span>' : ''}</h3>
       <div class="muted small">${esc(d.title || '')}</div></div>
       <button class="btn icon" data-dayedit="${d.id}" aria-label="Rename day">✏️</button></div>
@@ -227,6 +303,7 @@ route(/^#\/trip\/([^/]+)$/, async id => {
       <div class="row" style="margin-top:10px"><button class="btn grow" data-additem="${d.id}">+ Plan</button><button class="btn grow" data-addfood="${d.id}">+ Restaurant</button></div>
     </section>`;
   }).join('');
+  $('#assign') && ($('#assign').onclick = e => { e.preventDefault(); editTrip(t); });
   app.onclick = e => {
     const b = e.target.closest('[data-additem],[data-addfood],[data-itemedit],[data-dayedit]');
     if (!b) return;
@@ -270,7 +347,9 @@ function editItem(t, dayId, itemId) {
 }
 
 async function pickRestaurantForDay(t, dayId) {
-  const list = (await all('restaurants')).sort((a, b) => a.name.localeCompare(b.name));
+  const city = stopByDay(t)[dayId]?.city || '';
+  const same = r => city && (r.city || '').toLowerCase() === city.toLowerCase() ? 0 : 1;
+  const list = (await all('restaurants')).sort((a, b) => same(a) - same(b) || a.name.localeCompare(b.name));
   sheet(`<h2>Add a restaurant to this day</h2>
     <div class="searchbar"><span>🔎</span><input id="ps" placeholder="Search your restaurants"></div>
     <div id="pl"></div>
@@ -287,7 +366,7 @@ async function pickRestaurantForDay(t, dayId) {
         t.days.find(x => x.id === dayId).items.push({ id: uid(), time: '', title: '', restaurantId: li.dataset.id, notes: '' });
         await put('trips', t); close(); render();
       };
-      $('#pnew', el).onclick = () => { close(); location.hash = `#/r-new?trip=${t.id}&day=${dayId}`; };
+      $('#pnew', el).onclick = () => { close(); location.hash = `#/r-new?trip=${t.id}&day=${dayId}&city=${encodeURIComponent(city)}`; };
     });
 }
 
@@ -458,7 +537,7 @@ function parseShare(p) {
 async function restaurantForm(existing, params = new URLSearchParams()) {
   setTab('food');
   const shared = params.get('share') ? parseShare(params) : {};
-  const r = existing || { id: uid(), name: shared.name || '', city: '', cuisine: '', address: '', mapsUrl: shared.mapsUrl || '', mustTry: [], toOrder: [], tags: [], notes: '', price: 0, rating: 0, visited: false, frontPhotoId: null, foodPhotoIds: [], created: Date.now() };
+  const r = existing || { id: uid(), name: shared.name || '', city: params.get('city') || '', cuisine: '', address: '', mapsUrl: shared.mapsUrl || '', mustTry: [], toOrder: [], tags: [], notes: '', price: 0, rating: 0, visited: false, frontPhotoId: null, foodPhotoIds: [], created: Date.now() };
   setHeader(existing ? 'Edit restaurant' : 'New restaurant', { back: true });
   const all_ = await all('restaurants');
   const cities = [...new Set(all_.map(x => x.city).filter(Boolean))];
@@ -551,7 +630,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.1</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.2</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
@@ -584,5 +663,10 @@ route(/^#\/settings$/, async () => {
 });
 
 // ---------- boot ----------
-if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js');
+if ('serviceWorker' in navigator && location.protocol !== 'file:') {
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register('sw.js');
+  // When a new version is installed, reload once so it shows straight away.
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !document.querySelector('.sheet-bg')) location.reload(); });
+}
 render();
