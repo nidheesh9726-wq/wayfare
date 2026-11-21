@@ -105,6 +105,71 @@ function pickFiles(multiple, capture) {
   });
 }
 
+
+// ---------- locations ----------
+// Full Google Maps links carry coordinates; short maps.app.goo.gl links don't (and a web app can't open them to find out).
+function coordsFromText(t) {
+  t = decodeURIComponent(String(t || ''));
+  const pats = [/!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/, /@(-?\d+\.\d+),\s*(-?\d+\.\d+)/, /[?&](?:q|query|ll|center|destination)=(-?\d+\.\d+),\s*(-?\d+\.\d+)/, /^\s*(-?\d{1,2}\.\d+)\s*,\s*(-?\d{1,3}\.\d+)\s*$/];
+  for (const p of pats) { const m = t.match(p); if (m) { const lat = +m[1], lng = +m[2]; if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) return { lat, lng }; } }
+  return null;
+}
+const hasLoc = r => typeof r.lat === 'number' && typeof r.lng === 'number';
+function distKm(a, b) {
+  const R = 6371, rad = x => x * Math.PI / 180;
+  const dLat = rad(b.lat - a.lat), dLng = rad(b.lng - a.lng);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(rad(a.lat)) * Math.cos(rad(b.lat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+function fmtDist(km) {
+  const walk = Math.round(km * 1.3 / 0.08); // ~80 m a minute, streets ~30% longer than a straight line
+  const d = km < 1 ? Math.round(km * 1000 / 10) * 10 + ' m' : km.toFixed(km < 10 ? 1 : 0) + ' km';
+  return d + (km <= 3 ? ` · ~${Math.max(1, walk)} min walk` : '');
+}
+function myPosition() {
+  return new Promise((res, rej) => {
+    if (!navigator.geolocation) return rej(new Error('Location is not available on this device'));
+    navigator.geolocation.getCurrentPosition(p => res({ lat: p.coords.latitude, lng: p.coords.longitude }),
+      e => rej(new Error(e.code === 1 ? 'Location permission was declined' : 'Could not get your location')), { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+  });
+}
+// Look a name up on OpenStreetMap (needs internet; sends only the name and city you typed).
+async function lookupPlace(q) {
+  const res = await fetch('https://nominatim.openstreetmap.org/search?format=jsonv2&limit=5&q=' + encodeURIComponent(q), { headers: { Accept: 'application/json' } });
+  if (!res.ok) throw new Error('Lookup failed');
+  return (await res.json()).map(x => ({ lat: +x.lat, lng: +x.lon, label: x.display_name }));
+}
+// Location block used on the form and the detail page. onSet({lat,lng,src}) is called when a location is chosen.
+function locationBlock(el, r, getQuery, onSet) {
+  const draw = () => {
+    el.innerHTML = `<div class="small">${hasLoc(r) ? `📍 Location saved <span class="muted">(${esc({ link: 'from the Maps link', gps: 'from your phone’s GPS', lookup: 'looked up by name', typed: 'typed in' }[r.locSrc] || 'saved')})</span> · <a class="link" href="#" data-loc="clear">Remove</a>`
+      : '<span class="muted">No location yet. Add one to see what’s nearby.</span>'}</div>
+      <div class="row" style="margin-top:6px;flex-wrap:wrap"><button type="button" class="btn grow" data-loc="gps">📡 I’m here now</button><button type="button" class="btn grow" data-loc="lookup">🔎 Look up by name</button></div>
+      <div id="locres"></div>`;
+  };
+  draw();
+  el.onclick = async e => {
+    const b = e.target.closest('[data-loc],[data-pick]'); if (!b) return;
+    e.preventDefault();
+    const set = (lat, lng, src) => { Object.assign(r, { lat, lng, locSrc: src }); onSet && onSet(); draw(); toast('Location saved'); };
+    if (b.dataset.loc === 'clear') { delete r.lat; delete r.lng; delete r.locSrc; onSet && onSet(); draw(); }
+    if (b.dataset.loc === 'gps') { try { toast('Finding you…'); const p = await myPosition(); set(p.lat, p.lng, 'gps'); } catch (err) { toast(err.message); } }
+    if (b.dataset.loc === 'lookup') {
+      const q = getQuery(); if (!q.trim()) { toast('Add a name first'); return; }
+      const box = $('#locres', el); box.innerHTML = '<p class="small muted">Looking up…</p>';
+      try {
+        let found = await lookupPlace(q);
+        const name = q.split(',')[0];
+        if (!found.length && name !== q) found = await lookupPlace(name);
+        box.innerHTML = found.length ? `<p class="small muted" style="margin:8px 0 4px">Tap the right one:</p><ul class="list">${found.map((x, i) => `<li data-pick="${i}" style="cursor:pointer"><span class="small">${esc(x.label)}</span></li>`).join('')}</ul>`
+          : '<p class="small muted">Nothing found. Try “I’m here now” when you visit, or paste a full Google Maps link.</p>';
+        box.dataset.found = JSON.stringify(found);
+      } catch { box.innerHTML = '<p class="small muted">Couldn’t look it up. Check your internet connection.</p>'; }
+    }
+    if (b.dataset.pick !== undefined) { const x = JSON.parse($('#locres', el).dataset.found)[+b.dataset.pick]; set(x.lat, x.lng, 'lookup'); }
+  };
+}
+
 // ---------- chrome (header, tabs, sheets) ----------
 function setHeader(title, { back = false, actions = '' } = {}) {
   $('#title').textContent = title;
@@ -476,13 +541,14 @@ async function listView(kind) {
     <div class="row" style="margin-top:6px">
       <select id="trip" class="grow"><option value="">Any trip</option>${trips.map(t => `<option value="${t.id}" ${st.trip === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}</select>
       <select id="sort" class="grow">
-        <option value="recent">Newest first</option><option value="name">Name A–Z</option><option value="rating">Highest rated</option><option value="city">City</option>
+        <option value="recent">Newest first</option><option value="name">Name A–Z</option><option value="rating">Highest rated</option><option value="city">City</option><option value="near">Nearest to me</option>
       </select>
     </div>
     <div id="results"></div>`;
   $('#show').value = st.show; $('#sort').value = st.sort;
   if (kind !== 'food') st.cuisine = '';
 
+  let here = null;
   const clear = () => { Object.assign(st, { q: '', city: '', cuisine: '', chip: '', trip: '', show: 'all' }); saveState(kind); render(); };
   const draw = () => {
     saveState(kind);
@@ -506,6 +572,7 @@ async function listView(kind) {
       name: (a, b) => a.name.localeCompare(b.name),
       rating: (a, b) => (b.rating || 0) - (a.rating || 0) || a.name.localeCompare(b.name),
       city: (a, b) => (a.city || '~').localeCompare(b.city || '~') || a.name.localeCompare(b.name),
+      near: (a, b) => (hasLoc(a) && here ? distKm(here, a) : 1e9) - (hasLoc(b) && here ? distKm(here, b) : 1e9) || a.name.localeCompare(b.name),
     }[st.sort];
     f.sort(by);
     const box = $('#results');
@@ -524,6 +591,7 @@ async function listView(kind) {
         ${r.frontPhotoId ? `<img class="thumb" data-pid="${r.frontPhotoId}" alt="">` : r.foodPhotoIds?.[0] ? `<img class="thumb" data-pid="${r.foodPhotoIds[0]}" alt="">` : `<div class="thumb ph">${chipIcon(r)}</div>`}
         <div class="grow"><h3>${esc(r.name)} ${r.visited ? '✅' : ''}</h3>
           <div class="small muted">${esc([r.cuisine, r.city].filter(Boolean).join(' · '))} ${priceText(r)} ${stars(r.rating)}</div>
+          ${st.sort === 'near' && here && hasLoc(r) ? `<div class="small">📍 ${fmtDist(distKm(here, r))}</div>` : ''}
           ${r.mustTry?.length ? `<div class="small">⭐ ${esc(r.mustTry.slice(0, 3).join(', '))}${r.mustTry.length > 3 ? '…' : ''}</div>` : ''}
           ${chipTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}
         </div></a>`).join('');
@@ -536,7 +604,12 @@ async function listView(kind) {
   $('#chipf').onclick = e => { const c = e.target.closest('[data-chip]'); if (!c) return; st.chip = c.dataset.chip; document.querySelectorAll('#chipf .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); };
   $('#cui') && ($('#cui').onchange = e => { st.cuisine = e.target.value; draw(); });
   $('#show').onchange = e => { st.show = e.target.value; draw(); };
-  $('#sort').onchange = e => { st.sort = e.target.value; draw(); };
+  $('#sort').onchange = async e => {
+    st.sort = e.target.value;
+    if (st.sort === 'near' && !here) { try { toast('Finding you…'); here = await myPosition(); } catch (err) { toast(err.message); } }
+    draw();
+  };
+  if (st.sort === 'near' && !here) myPosition().then(p => { here = p; draw(); }).catch(() => {});
   $('#trip').onchange = e => { st.trip = e.target.value; draw(); };
   fab(() => (location.hash = K.newHash));
 }
@@ -578,6 +651,8 @@ route(/^#\/r\/([^/]+)$/, async id => {
     <p class="small muted">${K.galleryTip}</p>
 
     ${r.notes ? `<h2>Notes</h2><div class="card" style="white-space:pre-wrap">${esc(r.notes)}</div>` : ''}
+    <h2>Nearby</h2>
+    <div class="card" id="nearby"></div>
     ${onDays.length ? `<h2>In your itinerary</h2><div class="card">${onDays.map(({ t, d, i }) => `<div><a class="link" href="#/trip/${t.id}">${esc(t.name)}: Day ${i + 1}, ${fmtDate(d.date)}</a></div>`).join('')}</div>` : ''}
     ${r.frontPhotoId ? `<p style="margin-top:16px"><button class="btn" id="changefront">${K.changeFront}</button></p>` : ''}
   `;
@@ -595,6 +670,28 @@ route(/^#\/r\/([^/]+)$/, async id => {
   $('#addfood').onclick = () => addFood(false);
   $('#snapfood').onclick = () => addFood(true);
   $('#gal').onclick = e => { const v = e.target.closest('[data-view]'); if (v) viewer(v.dataset.view); };
+
+  // Nearby: closest restaurants (and places) to this one, by straight-line distance.
+  const everything = (await all('restaurants')).filter(x => x.id !== r.id);
+  let nearKind = kindOf(r) === 'place' ? 'food' : 'place';
+  const drawNearby = () => {
+    const box = $('#nearby');
+    if (!hasLoc(r)) { box.innerHTML = '<div id="locblk"></div>'; locationBlock($('#locblk'), r, () => [r.name, r.city].filter(Boolean).join(', '), async () => { await save(); drawNearby(); }); return; }
+    const cands = ofKind(everything, nearKind);
+    const withLoc = cands.filter(hasLoc).map(x => ({ x, km: distKm(r, x) })).sort((a, b) => a.km - b.km);
+    const shown = withLoc.slice(0, 8), missing = cands.length - withLoc.length;
+    box.innerHTML = `<div class="chips" id="nk" style="margin-bottom:6px">
+        <button class="chip ${nearKind === 'food' ? 'on' : ''}" data-nk="food">🍽️ Restaurants</button><button class="chip ${nearKind === 'place' ? 'on' : ''}" data-nk="place">📍 Places</button></div>
+      ${shown.length ? `<ul class="list">${shown.map(({ x, km }) => `<li><a class="rcard grow" href="#/r/${x.id}" style="align-items:center">
+          ${x.frontPhotoId ? `<img class="thumb" style="width:52px;height:52px" data-pid="${x.frontPhotoId}" alt="">` : `<div class="thumb ph" style="width:52px;height:52px;font-size:22px">${chipIcon(x)}</div>`}
+          <div class="grow"><b>${esc(x.name)}</b> ${x.visited ? '✅' : ''}<div class="small muted">${fmtDist(km)}</div><div>${chipTags(x)}</div></div></a></li>`).join('')}</ul>`
+        : `<p class="small muted">No ${KINDS[nearKind].title.toLowerCase()} with a location yet.</p>`}
+      ${missing ? `<p class="small muted" style="margin:8px 0 0">${missing} other ${missing === 1 ? KINDS[nearKind].one : KINDS[nearKind].title.toLowerCase()} ${missing === 1 ? 'has' : 'have'} no location yet, so ${missing === 1 ? 'it isn’t' : 'they aren’t'} included.</p>` : ''}
+      <p class="small muted" style="margin:8px 0 0">📍 This ${KINDS[kindOf(r)].one}’s location: ${esc({ link: 'from the Maps link', gps: 'from your phone’s GPS', lookup: 'looked up by name', typed: 'typed in' }[r.locSrc] || 'saved')}. Change it with ✏️.</p>`;
+    hydrateImgs(box);
+    $('#nk').onclick = e => { const c = e.target.closest('[data-nk]'); if (c) { nearKind = c.dataset.nk; drawNearby(); } };
+  };
+  drawNearby();
 });
 
 // Add/edit form
@@ -643,6 +740,7 @@ async function itemForm(kind, existing, params = new URLSearchParams()) {
     ${shared.mapsUrl ? '<div class="card small">📍 Added from Google Maps. Check the name, then fill in the rest.</div>' : ''}
     <label class="f">Name</label><input id="n" value="${esc(r.name)}" placeholder="${esc(K.namePh)}">
     <label class="f">Google Maps link</label><input id="m" value="${esc(r.mapsUrl)}" inputmode="url" placeholder="Paste from Maps → Share → Copy link">
+    <label class="f">Location (for “nearby”)</label><div id="loc"></div>
     <label class="f">City</label>
     <select id="c"><option value="">Choose a city</option>
       ${co.groups.map(([label, cs]) => `<optgroup label="${esc(label)}">${cs.map(c => `<option ${c === curCity ? 'selected' : ''}>${esc(c)}</option>`).join('')}</optgroup>`).join('')}
@@ -673,6 +771,11 @@ async function itemForm(kind, existing, params = new URLSearchParams()) {
     history.replaceState(null, '', KINDS[otherKind].newHash + '?' + p.toString()); render();
   });
   if (!existing && params.get('name') !== null) { $('#n').value = params.get('name'); $('#m').value = params.get('maps') || ''; }
+  // Location: taken from a full Maps link automatically, or set by GPS / name lookup.
+  const fromLink = () => { const c = coordsFromText($('#m').value); if (c && !(hasLoc(r) && r.locSrc !== 'link')) { Object.assign(r, c, { locSrc: 'link' }); drawLoc(); } };
+  const cityVal = () => $('#c').value === '__new' ? $('#cnew').value : ($('#c').value || '');
+  const drawLoc = () => locationBlock($('#loc'), r, () => [$('#n').value, cityVal()].filter(Boolean).join(', '));
+  drawLoc(); fromLink(); $('#m').addEventListener('input', fromLink);
   wireListEditor($('#mt'), K.itemPh); wireListEditor($('#to'), K.itemPh);
   if (!co.groups.length) { $('#c').value = '__new'; $('#cnew').hidden = false; }
   $('#c').onchange = e => { const isNew = e.target.value === '__new'; $('#cnew').hidden = !isNew; if (isNew) $('#cnew').focus(); };
@@ -743,7 +846,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.6</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.7</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
