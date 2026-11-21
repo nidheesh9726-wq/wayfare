@@ -384,7 +384,23 @@ async function pickRestaurantForDay(t, dayId) {
 // ======================================================================
 // RESTAURANTS
 // ======================================================================
-const foodState = { q: '', city: '', cuisine: '', show: 'all', sort: 'recent', trip: '' };
+// Meal types: a place can have more than one (e.g. a café for breakfast and dessert).
+const MEALS = [['breakfast', '🍳', 'Breakfast'], ['main', '🍽️', 'Lunch / dinner'], ['dessert', '🍰', 'Dessert']];
+const mealTags = r => MEALS.filter(([k]) => (r.meals || []).includes(k)).map(([, ic, l]) => `<span class="tag">${ic} ${l}</span>`).join('');
+// Cities for the dropdown: each trip's destinations first, then any other city already used.
+async function cityOptions(extra) {
+  const seen = new Map(), groups = [];
+  const add = (list, label) => {
+    const fresh = [];
+    for (const c of list) { const k = (c || '').trim().toLowerCase(); if (k && !seen.has(k)) { seen.set(k, c.trim()); fresh.push(c.trim()); } }
+    if (fresh.length) groups.push([label, fresh]);
+  };
+  const trips = (await all('trips')).sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+  for (const t of trips) add(tripStops(t).map(s => s.city), t.name);
+  add([...(await all('restaurants')).map(r => r.city), extra].sort(), 'Other cities');
+  return { groups, canonical: c => seen.get((c || '').trim().toLowerCase()) || (c || '').trim() };
+}
+const foodState = { q: '', city: '', cuisine: '', show: 'all', sort: 'recent', trip: '', meal: '' };
 try { Object.assign(foodState, JSON.parse(localStorage.getItem('foodState') || '{}')); foodState.q = ''; } catch {}
 
 route(/^#\/food$/, async () => {
@@ -392,7 +408,7 @@ route(/^#\/food$/, async () => {
   const [list, trips] = await Promise.all([all('restaurants'), all('trips')]);
   const tripOf = {};
   for (const t of trips) for (const d of t.days || []) for (const it of d.items) if (it.restaurantId) (tripOf[it.restaurantId] ||= new Set()).add(t.id);
-  const cities = [...new Set(list.map(r => r.city).filter(Boolean))].sort();
+  const cities = [...new Map(list.filter(r => r.city).map(r => [r.city.toLowerCase(), r.city])).values()].sort();
   const cuisines = [...new Set(list.map(r => r.cuisine).filter(Boolean))].sort();
 
   app.innerHTML = `
@@ -400,6 +416,10 @@ route(/^#\/food$/, async () => {
     <div class="chips" id="cities" style="margin-top:8px">
       <button class="chip ${!foodState.city ? 'on' : ''}" data-city="">All cities</button>
       ${cities.map(c => `<button class="chip ${foodState.city === c ? 'on' : ''}" data-city="${esc(c)}">${esc(c)}</button>`).join('')}
+    </div>
+    <div class="chips" id="mealf" style="flex-wrap:wrap">
+      <button class="chip ${!foodState.meal ? 'on' : ''}" data-meal="">Any meal</button>
+      ${MEALS.map(([k, ic, l]) => `<button class="chip ${foodState.meal === k ? 'on' : ''}" data-meal="${k}">${ic} ${l}</button>`).join('')}
     </div>
     <div class="row" style="margin-top:6px">
       <select id="cui" class="grow"><option value="">Any cuisine</option>${cuisines.map(c => `<option ${foodState.cuisine === c ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
@@ -420,14 +440,15 @@ route(/^#\/food$/, async () => {
     localStorage.setItem('foodState', JSON.stringify(foodState));
     const words = foodState.q.toLowerCase().split(/\s+/).filter(Boolean);
     let f = list.filter(r => {
-      if (foodState.city && r.city !== foodState.city) return false;
+      if (foodState.city && (r.city || '').toLowerCase() !== foodState.city.toLowerCase()) return false;
       if (foodState.cuisine && r.cuisine !== foodState.cuisine) return false;
+      if (foodState.meal && !(r.meals || []).includes(foodState.meal)) return false;
       if (foodState.show === 'todo' && r.visited) return false;
       if (foodState.show === 'visited' && !r.visited) return false;
       if (foodState.show === 'fav' && (r.rating || 0) < 4) return false;
       if (foodState.trip && !(tripOf[r.id]?.has(foodState.trip))) return false;
       if (words.length) {
-        const hay = [r.name, r.city, r.cuisine, r.address, r.notes, ...(r.mustTry || []), ...(r.toOrder || []).map(x => x.text), ...(r.tags || [])].join(' ').toLowerCase();
+        const hay = [r.name, r.city, r.cuisine, r.address, r.notes, ...(r.mustTry || []), ...(r.toOrder || []).map(x => x.text), ...(r.tags || []), ...MEALS.filter(([k]) => (r.meals || []).includes(k)).map(m => m[2])].join(' ').toLowerCase();
         return words.every(w => hay.includes(w));
       }
       return true;
@@ -450,13 +471,14 @@ route(/^#\/food$/, async () => {
         <div class="grow"><h3>${esc(r.name)} ${r.visited ? '✅' : ''}</h3>
           <div class="small muted">${esc([r.cuisine, r.city].filter(Boolean).join(' · '))} ${r.price ? '· ' + '$'.repeat(r.price) : ''} ${stars(r.rating)}</div>
           ${r.mustTry?.length ? `<div class="small">⭐ ${esc(r.mustTry.slice(0, 3).join(', '))}${r.mustTry.length > 3 ? '…' : ''}</div>` : ''}
-          ${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}
+          ${mealTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}
         </div></a>`).join('');
     hydrateImgs(box);
   };
   draw();
   $('#q').oninput = e => { foodState.q = e.target.value; draw(); };
   $('#cities').onclick = e => { const c = e.target.closest('[data-city]'); if (!c) return; foodState.city = c.dataset.city; document.querySelectorAll('#cities .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); };
+  $('#mealf').onclick = e => { const c = e.target.closest('[data-meal]'); if (!c) return; foodState.meal = c.dataset.meal; document.querySelectorAll('#mealf .chip').forEach(x => x.classList.toggle('on', x === c)); draw(); };
   $('#cui').onchange = e => { foodState.cuisine = e.target.value; draw(); };
   $('#show').onchange = e => { foodState.show = e.target.value; draw(); };
   $('#sort').onchange = e => { foodState.sort = e.target.value; draw(); };
@@ -480,7 +502,7 @@ route(/^#\/r\/([^/]+)$/, async id => {
     <div style="margin-top:12px">
       <div class="small muted">${esc([r.cuisine, r.city].filter(Boolean).join(' · '))} ${r.price ? '· ' + '$'.repeat(r.price) : ''}</div>
       ${r.address ? `<div class="small">${esc(r.address)}</div>` : ''}
-      <div style="margin-top:4px">${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div>
+      <div style="margin-top:4px">${mealTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}</div>
     </div>
     <div class="row" style="margin-top:12px">
       ${maps ? `<a class="btn primary grow" href="${esc(maps)}" target="_blank" rel="noopener">📍 Open in Maps</a>` : ''}
@@ -548,10 +570,11 @@ function parseShare(p) {
 async function restaurantForm(existing, params = new URLSearchParams()) {
   setTab('food');
   const shared = params.get('share') ? parseShare(params) : {};
-  const r = existing || { id: uid(), name: shared.name || '', city: params.get('city') || '', cuisine: '', address: '', mapsUrl: shared.mapsUrl || '', mustTry: [], toOrder: [], tags: [], notes: '', price: 0, rating: 0, visited: false, frontPhotoId: null, foodPhotoIds: [], created: Date.now() };
+  const r = existing || { id: uid(), name: shared.name || '', city: params.get('city') || '', meals: [], cuisine: '', address: '', mapsUrl: shared.mapsUrl || '', mustTry: [], toOrder: [], tags: [], notes: '', price: 0, rating: 0, visited: false, frontPhotoId: null, foodPhotoIds: [], created: Date.now() };
   setHeader(existing ? 'Edit restaurant' : 'New restaurant', { back: true });
   const all_ = await all('restaurants');
-  const cities = [...new Set(all_.map(x => x.city).filter(Boolean))];
+  const co = await cityOptions(r.city);
+  const curCity = co.canonical(r.city);
   const cuisines = [...new Set(all_.map(x => x.cuisine).filter(Boolean))];
   let pendingFront = null, pendingFood = [];
 
@@ -559,9 +582,14 @@ async function restaurantForm(existing, params = new URLSearchParams()) {
     ${shared.mapsUrl ? '<div class="card small">📍 Added from Google Maps. Check the name, then fill in the rest.</div>' : ''}
     <label class="f">Name</label><input id="n" value="${esc(r.name)}" placeholder="Ichiran Shibuya">
     <label class="f">Google Maps link</label><input id="m" value="${esc(r.mapsUrl)}" inputmode="url" placeholder="Paste from Maps → Share → Copy link">
-    <div class="row"><div class="grow"><label class="f">City</label><input id="c" list="cl" value="${esc(r.city)}" placeholder="Tokyo"></div>
-    <div class="grow"><label class="f">Cuisine</label><input id="cu" list="cul" value="${esc(r.cuisine)}" placeholder="Ramen"></div></div>
-    <datalist id="cl">${cities.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
+    <label class="f">City</label>
+    <select id="c"><option value="">Choose a city</option>
+      ${co.groups.map(([label, cs]) => `<optgroup label="${esc(label)}">${cs.map(c => `<option ${c === curCity ? 'selected' : ''}>${esc(c)}</option>`).join('')}</optgroup>`).join('')}
+      <option value="__new">＋ Type a new city…</option></select>
+    <input id="cnew" placeholder="City name" hidden style="margin-top:6px">
+    <label class="f">Meal</label>
+    <div class="chips" id="meals" style="flex-wrap:wrap">${MEALS.map(([k, ic, l]) => `<button type="button" class="chip ${(r.meals || []).includes(k) ? 'on' : ''}" data-meal="${k}">${ic} ${l}</button>`).join('')}</div>
+    <label class="f">Cuisine</label><input id="cu" list="cul" value="${esc(r.cuisine)}" placeholder="Ramen">
     <datalist id="cul">${cuisines.map(c => `<option value="${esc(c)}">`).join('')}</datalist>
     <label class="f">Area / address (optional)</label><input id="a" value="${esc(r.address)}" placeholder="Near Shibuya station, B1 floor">
     <label class="f">Price</label><select id="pr"><option value="0">Not set</option>${[1, 2, 3, 4].map(n => `<option value="${n}" ${r.price === n ? 'selected' : ''}>${'$'.repeat(n)}</option>`).join('')}</select>
@@ -577,6 +605,9 @@ async function restaurantForm(existing, params = new URLSearchParams()) {
     <div class="row" style="margin-top:18px">${existing ? '<button class="btn danger" id="del">Delete</button>' : ''}<span class="grow"></span><button class="btn primary" id="save">Save</button></div>`;
 
   wireListEditor($('#mt'), 'Add a dish'); wireListEditor($('#to'), 'Add a dish');
+  if (!co.groups.length) { $('#c').value = '__new'; $('#cnew').hidden = false; }
+  $('#c').onchange = e => { const isNew = e.target.value === '__new'; $('#cnew').hidden = !isNew; if (isNew) $('#cnew').focus(); };
+  $('#meals').onclick = e => { const c = e.target.closest('[data-meal]'); if (c) c.classList.toggle('on'); };
   if (!existing) {
     const info = () => { $('#pinfo').textContent = [pendingFront ? 'Front photo added' : '', pendingFood.length ? pendingFood.length + ' food photo(s) added' : ''].filter(Boolean).join(' · '); };
     $('#pf').onclick = async () => { const f = await pickFiles(false); if (f.length) { pendingFront = f[0]; info(); } };
@@ -588,7 +619,8 @@ async function restaurantForm(existing, params = new URLSearchParams()) {
     if (!name) { toast('Give it a name first'); $('#n').focus(); return; }
     const prevOrder = Object.fromEntries((r.toOrder || []).map(x => [x.text, x.done]));
     Object.assign(r, {
-      name, mapsUrl: $('#m').value.trim(), city: $('#c').value.trim(), cuisine: $('#cu').value.trim(),
+      name, mapsUrl: $('#m').value.trim(), city: $('#c').value === '__new' ? co.canonical($('#cnew').value) : $('#c').value,
+      meals: [...document.querySelectorAll('#meals .chip.on')].map(c => c.dataset.meal), cuisine: $('#cu').value.trim(),
       address: $('#a').value.trim(), price: +$('#pr').value, mustTry: readList($('#mt')),
       toOrder: readList($('#to')).map(text => ({ text, done: !!prevOrder[text] })),
       tags: splitList($('#tg').value), notes: $('#no').value.trim(), updated: Date.now(),
@@ -641,7 +673,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.3</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.4</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
