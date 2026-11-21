@@ -56,7 +56,16 @@ function fmtDate(iso, opts = { weekday: 'short', day: 'numeric', month: 'short' 
   if (!iso) return '';
   const d = new Date(iso + 'T00:00:00'); return d.toLocaleDateString(undefined, opts);
 }
-function addDays(iso, n) { const d = new Date(iso + 'T00:00:00'); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); }
+// Date maths is done in UTC so it gives the same answer in every time zone (e.g. India, UTC+5:30).
+function addDays(iso, n) { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); }
+function todayISO() { const d = new Date(); return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())).toISOString().slice(0, 10); }
+// Repairs trips saved by v0.2 in time zones east of UTC, where every day got the same date.
+function repairDays(t) {
+  const seen = {}, out = [];
+  for (const d of t.days || []) { if (seen[d.date]) seen[d.date].items.push(...d.items); else { seen[d.date] = d; out.push(d); } }
+  if (out.length === (t.days || []).length) return false;
+  t.days = buildDays(t.start, t.end, out); return true;
+}
 function stars(n) { return n ? '<span class="stars">' + '★'.repeat(n) + '</span>' : ''; }
 function splitList(s) { return String(s || '').split(/[,\n]/).map(x => x.trim()).filter(Boolean); }
 function safeUrl(u) { try { const x = new URL(u); return /^https?:$/.test(x.protocol) ? x.href : ''; } catch { return ''; } }
@@ -140,10 +149,11 @@ window.addEventListener('hashchange', render);
 route(/^#\/trips$/, async () => {
   setTab('trips'); setHeader('Wayfare');
   const trips = (await all('trips')).sort((a, b) => (b.start || '').localeCompare(a.start || ''));
+  for (const t of trips) if (repairDays(t)) await put('trips', t);
   if (!trips.length) {
     app.innerHTML = `<div class="empty"><div class="big">🧳</div><p><b>No trips yet</b><br>Add a trip to plan it day by day.</p></div>`;
   } else {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayISO();
     app.innerHTML = trips.map(t => {
       const nDays = (t.days || []).length;
       const status = t.start && t.end ? (today < t.start ? 'Upcoming' : today > t.end ? 'Past' : 'Happening now') : '';
@@ -262,10 +272,11 @@ route(/^#\/trip\/([^/]+)$/, async id => {
   setTab('trips');
   const t = await get('trips', id);
   if (!t) return (location.hash = '#/trips');
+  if (repairDays(t)) await put('trips', t);
   const rest = Object.fromEntries((await all('restaurants')).map(r => [r.id, r]));
   setHeader(t.name, { back: true, actions: '<button class="btn icon" id="edt" aria-label="Edit trip">✏️</button>' });
   $('#edt').onclick = () => editTrip(t);
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   if (!t.days.length) {
     app.innerHTML = `<div class="empty"><div class="big">📅</div><p>Set the trip dates to get a page per day.</p></div>`;
     return;
@@ -630,7 +641,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.2</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.3</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
@@ -638,7 +649,7 @@ route(/^#\/settings$/, async () => {
     const data = { app: 'wayfare', version: 1, exported: new Date().toISOString(), trips: await all('trips'), restaurants: await all('restaurants'),
       photos: await Promise.all(ph.map(async p => ({ id: p.id, caption: p.caption, created: p.created, data: await blobToDataURL(p.blob) }))) };
     const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-    const name = `wayfare-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    const name = `wayfare-backup-${todayISO()}.json`;
     const file = new File([blob], name, { type: 'application/json' });
     if (navigator.canShare?.({ files: [file] })) {
       try { await navigator.share({ files: [file], title: name }); localStorage.setItem('lastBackup', Date.now()); render(); return; } catch (e) { if (e.name === 'AbortError') return; }
