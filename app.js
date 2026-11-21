@@ -898,7 +898,17 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.10</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.11 · <a class="link" href="#" id="upd">Check for updates</a></p>`;
+  $('#upd').onclick = async e => {
+    e.preventDefault();
+    if (!window.swReg) { toast('Updates aren’t available here'); return; }
+    toast('Checking…');
+    try {
+      await window.swReg.update();
+      const w = window.swReg.installing || window.swReg.waiting;
+      if (w) toast('Updating, the app will reload in a moment'); else toast('You have the latest version');
+    } catch { toast('Couldn’t check. Are you online?'); }
+  };
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');
@@ -933,7 +943,12 @@ route(/^#\/settings$/, async () => {
 // ---------- boot ----------
 if ('serviceWorker' in navigator && location.protocol !== 'file:') {
   const hadController = !!navigator.serviceWorker.controller;
-  navigator.serviceWorker.register('sw.js');
+  // updateViaCache 'none' makes the phone always ask the website for the newest version.
+  navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => {
+    window.swReg = reg;
+    // Check for a new version whenever the app comes back on screen, not only on a fresh start.
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => {}); });
+  });
   // When a new version is installed, reload once so it shows straight away.
   navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !document.querySelector('.sheet-bg')) location.reload(); });
 }
