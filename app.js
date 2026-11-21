@@ -408,6 +408,9 @@ route(/^#\/food$/, async () => {
   const [list, trips] = await Promise.all([all('restaurants'), all('trips')]);
   const tripOf = {};
   for (const t of trips) for (const d of t.days || []) for (const it of d.items) if (it.restaurantId) (tripOf[it.restaurantId] ||= new Set()).add(t.id);
+  // A restaurant belongs to a trip if it's on one of its days OR it's in one of the trip's cities.
+  const tripCities = Object.fromEntries(trips.map(t => [t.id, new Set(tripStops(t).map(s => s.city.toLowerCase()))]));
+  if (foodState.trip && !tripCities[foodState.trip]) foodState.trip = ''; // trip was deleted
   const cities = [...new Map(list.filter(r => r.city).map(r => [r.city.toLowerCase(), r.city])).values()].sort();
   const cuisines = [...new Set(list.map(r => r.cuisine).filter(Boolean))].sort();
 
@@ -446,7 +449,7 @@ route(/^#\/food$/, async () => {
       if (foodState.show === 'todo' && r.visited) return false;
       if (foodState.show === 'visited' && !r.visited) return false;
       if (foodState.show === 'fav' && (r.rating || 0) < 4) return false;
-      if (foodState.trip && !(tripOf[r.id]?.has(foodState.trip))) return false;
+      if (foodState.trip && !(tripOf[r.id]?.has(foodState.trip)) && !tripCities[foodState.trip].has((r.city || '').toLowerCase())) return false;
       if (words.length) {
         const hay = [r.name, r.city, r.cuisine, r.address, r.notes, ...(r.mustTry || []), ...(r.toOrder || []).map(x => x.text), ...(r.tags || []), ...MEALS.filter(([k]) => (r.meals || []).includes(k)).map(m => m[2])].join(' ').toLowerCase();
         return words.every(w => hay.includes(w));
@@ -465,7 +468,13 @@ route(/^#\/food$/, async () => {
       box.innerHTML = `<div class="empty"><div class="big">🍽️</div><p><b>No restaurants yet</b><br>Tap + to add one, or share a place from Google Maps to Wayfare.</p></div>`;
       return;
     }
-    box.innerHTML = `<p class="small muted">${f.length} of ${list.length}</p>` + f.map(r => `
+    const filtered = foodState.q || foodState.city || foodState.cuisine || foodState.meal || foodState.trip || foodState.show !== 'all';
+    if (!f.length) {
+      box.innerHTML = `<div class="empty"><div class="big">🔍</div><p><b>No restaurants match these filters</b><br>You have ${list.length} saved.</p><button class="btn primary" id="clearf">Clear filters</button></div>`;
+      $('#clearf').onclick = () => { Object.assign(foodState, { q: '', city: '', cuisine: '', meal: '', trip: '', show: 'all' }); localStorage.setItem('foodState', JSON.stringify(foodState)); render(); };
+      return;
+    }
+    box.innerHTML = `<p class="small muted row"><span class="grow">${f.length} of ${list.length}</span>${filtered ? '<a class="link" href="#" id="clearf">Clear filters</a>' : ''}</p>` + f.map(r => `
       <a class="card rcard" href="#/r/${r.id}">
         ${r.frontPhotoId ? `<img class="thumb" data-pid="${r.frontPhotoId}" alt="">` : r.foodPhotoIds?.[0] ? `<img class="thumb" data-pid="${r.foodPhotoIds[0]}" alt="">` : '<div class="thumb ph">🍽️</div>'}
         <div class="grow"><h3>${esc(r.name)} ${r.visited ? '✅' : ''}</h3>
@@ -473,6 +482,7 @@ route(/^#\/food$/, async () => {
           ${r.mustTry?.length ? `<div class="small">⭐ ${esc(r.mustTry.slice(0, 3).join(', '))}${r.mustTry.length > 3 ? '…' : ''}</div>` : ''}
           ${mealTags(r)}${(r.tags || []).map(x => `<span class="tag">${esc(x)}</span>`).join('')}
         </div></a>`).join('');
+    $('#clearf') && ($('#clearf').onclick = e => { e.preventDefault(); Object.assign(foodState, { q: '', city: '', cuisine: '', meal: '', trip: '', show: 'all' }); localStorage.setItem('foodState', JSON.stringify(foodState)); render(); });
     hydrateImgs(box);
   };
   draw();
@@ -673,7 +683,7 @@ route(/^#\/settings$/, async () => {
     <div class="card"><b>Restore</b><p class="small muted">Load a backup file. Matching items are updated; nothing else is deleted.</p>
       <button class="btn block" id="imp">⬆️ Restore from file</button></div>
     <div class="card"><b>Install on your phone</b><p class="small muted">In Chrome, tap ⋮ then "Add to Home screen" (or "Install app"). After that, open Wayfare from its icon; it works with no internet. Once installed, you can tap Share on any place in Google Maps and choose Wayfare to save it.</p></div>
-    <p class="small muted" style="text-align:center">Wayfare v0.4</p>`;
+    <p class="small muted" style="text-align:center">Wayfare v0.5</p>`;
   $('#persist') && ($('#persist').onclick = async () => { const ok = await navigator.storage.persist(); toast(ok ? 'Protected' : 'Chrome declined. Install the app first, then try again.'); render(); });
   $('#exp').onclick = async () => {
     toast('Preparing backup…');

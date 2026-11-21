@@ -1,5 +1,5 @@
 // Caches the app so it opens with no internet. Bump VERSION when files change.
-const VERSION = 'wayfare-v4';
+const VERSION = 'wayfare-v5';
 const FILES = ['./', './index.html', './app.js', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES))); self.skipWaiting(); });
 self.addEventListener('activate', e => {
